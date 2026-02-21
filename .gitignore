@@ -1,0 +1,23 @@
+# Binary output
+dist/
+mayence
+mayence.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+*.secret
+
+# Test output
+*.test
+coverage.out
+coverage.html
+
+# Vendor (use Go modules instead)
+vendor/
