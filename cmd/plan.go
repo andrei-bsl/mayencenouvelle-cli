@@ -80,7 +80,9 @@ Examples:
 			if err != nil {
 				printError("Coolify", err)
 			} else {
-				printPlanActions(coolifyPlan)
+				for _, action := range coolifyPlan {
+					fmt.Printf("    %s %s: %s\n", color.CyanString("→"), action.Resource, action.Detail)
+				}
 			}
 
 			// Authentik diff (only oidc apps)
@@ -90,7 +92,9 @@ Examples:
 				if err != nil {
 					printError("Authentik", err)
 				} else {
-					printPlanActions(authentikPlan)
+					for _, action := range authentikPlan {
+						fmt.Printf("    %s %s: %s\n", color.CyanString("→"), action.Resource, action.Detail)
+					}
 				}
 			}
 
@@ -100,7 +104,9 @@ Examples:
 			if err != nil {
 				printError("Traefik", err)
 			} else {
-				printPlanActions(traefikPlan)
+				for _, action := range traefikPlan {
+					fmt.Printf("    %s %s: %s\n", color.CyanString("→"), action.Resource, action.Detail)
+				}
 			}
 		}
 
@@ -109,32 +115,10 @@ Examples:
 	},
 }
 
-// PlanAction represents a single planned operation.
-type PlanAction struct {
-	Operation string // create | update | delete | no-change
-	Resource  string
-	Detail    string
-}
-
 func printSection(name string) {
 	fmt.Printf("  %s\n", color.BlueString("[%s]", name))
 }
 
 func printError(section string, err error) {
 	fmt.Printf("    %s %s: %v\n", color.RedString("✗"), section, err)
-}
-
-func printPlanActions(actions []PlanAction) {
-	for _, a := range actions {
-		switch a.Operation {
-		case "create":
-			fmt.Printf("    %s %s: %s\n", color.GreenString("+"), a.Resource, a.Detail)
-		case "update":
-			fmt.Printf("    %s %s: %s\n", color.YellowString("~"), a.Resource, a.Detail)
-		case "delete":
-			fmt.Printf("    %s %s: %s\n", color.RedString("-"), a.Resource, a.Detail)
-		default:
-			fmt.Printf("    %s %s\n", color.WhiteString("="), a.Resource)
-		}
-	}
 }

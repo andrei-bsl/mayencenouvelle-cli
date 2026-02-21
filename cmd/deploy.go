@@ -62,7 +62,7 @@ Examples:
 			return nil
 		}
 
-		fmt.Printf("%s deploying %s...\n\n", color.CyanString("→"), color.BoldString(appName))
+		fmt.Printf("%s deploying %s...\n\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName))
 
 		// ── 2. Authentik OAuth2 (only for oidc apps) ─────────────────────────
 		var clientID, clientSecret string
@@ -120,7 +120,7 @@ Examples:
 		ok("Health", "service is healthy")
 
 		// ── Done ────────────────────────────────────────────────────────────────
-		fmt.Printf("\n%s %s deployed successfully!\n", color.GreenString("✓"), color.BoldString(appName))
+		fmt.Printf("\n%s %s deployed successfully!\n", color.GreenString("✓"), color.New(color.Bold).Sprint(appName))
 		if app.Spec.Domains.Internal != "" {
 			fmt.Printf("  Internal: https://%s\n", app.Spec.Domains.Internal)
 		}

@@ -47,7 +47,7 @@ Examples:
 			return fmt.Errorf("%s does not use OIDC auth — nothing to rotate", appName)
 		}
 
-		fmt.Printf("%s rotating secrets for %s...\n", color.CyanString("→"), color.BoldString(appName))
+		fmt.Printf("%s rotating secrets for %s...\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName))
 
 		// 1. Rotate in Authentik
 		step("Authentik", "Regenerating client credentials")

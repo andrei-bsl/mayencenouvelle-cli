@@ -39,7 +39,7 @@ Examples:
 			return err
 		}
 
-		fmt.Printf("%s rolling back %s...\n", color.YellowString("↩"), color.BoldString(appName))
+		fmt.Printf("%s rolling back %s...\n", color.YellowString("↩"), color.New(color.Bold).Sprint(appName))
 
 		coolifyClient := coolify.NewClient(
 			viper.GetString("COOLIFY_ENDPOINT"),
