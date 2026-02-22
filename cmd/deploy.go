@@ -16,7 +16,7 @@ import (
 var deployCmd = &cobra.Command{
 	Use:   "deploy <app-name>",
 	Short: "Deploy a single app end-to-end (Coolify + Authentik + DNS + webhook)",
-	Long: `Reads the app manifest and applies all required configuration:
+	Long: `Reads the app manifest and applies required configuration:
 
   1. Validates the manifest
   2. Creates/updates Authentik OAuth2 provider + application (if auth: oidc)
@@ -24,9 +24,9 @@ var deployCmd = &cobra.Command{
   4. Triggers initial deployment in Coolify
   5. Waits for health check to pass
 
-  Note: domain routing (FQDN) must be set manually in Coolify UI after first deploy.
-  Coolify API does not allow setting fqdn via API — routing is handled by Coolify's
-  internal Traefik proxy using the wildcard *.apps.mayencenouvelle.internal rule.
+For non-Coolify apps (systemd-service, etc.) a note is printed if DNS rewrites are needed.
+Wildcard *.apps.mayencenouvelle.internal covers Coolify apps — only custom hostnames
+need a manual AdGuard DNS rewrite.
 
 All operations are idempotent — safe to run multiple times.
 
@@ -70,25 +70,36 @@ Examples:
 
 		// ── 2. Authentik OAuth2 (only for oidc apps) ─────────────────────────
 		var clientID, clientSecret string
+		authentikClient := authentik.NewClient(
+			viper.GetString("AUTHENTIK_URL"),
+			viper.GetString("AUTHENTIK_API_TOKEN"),
+		)
 		if app.Spec.Capabilities.Auth == "oidc" {
-			step("Authentik", "Creating OAuth2 provider + application")
-			authentikClient := authentik.NewClient(
-				viper.GetString("AUTHENTIK_ENDPOINT"),
-				viper.GetString("AUTHENTIK_API_TOKEN"),
-			)
-			creds, err := authentikClient.EnsureOAuth2Provider(ctx, app)
+			step("Authentik", "Reconciling OAuth2 provider + application")
+			creds, err := authentikClient.EnsureOAuth2Provider(ctx, app, base)
 			if err != nil {
 				return fmt.Errorf("authentik: %w", err)
 			}
 			clientID = creds.ClientID
 			clientSecret = creds.ClientSecret
-			ok("Authentik", fmt.Sprintf("provider %s ready", creds.ProviderName))
+			action := "updated"
+			if creds.Created {
+				action = "created"
+			}
+			ok("Authentik", fmt.Sprintf("provider %s %s", creds.ProviderName, action))
+		} else {
+			// If auth was previously oidc and has been removed from the manifest,
+			// clean up any stale Authentik resources (idempotent — no-op if absent).
+			if err := authentikClient.DeleteOIDC(ctx, appName); err != nil {
+				// Non-fatal: log and continue (resource may not exist)
+				fmt.Printf("  %s [Authentik] cleanup skipped: %v\n", color.YellowString("⚠"), err)
+			}
 		}
 
 		// ── 3. Coolify service ────────────────────────────────────────────────
 		step("Coolify", "Creating/updating service")
 		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
+			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 		// Inject Authentik credentials into env if present
@@ -122,7 +133,6 @@ Examples:
 
 		// ── Done ────────────────────────────────────────────────────────────────
 		domains := app.GetDomains()
-		coolifyURL := viper.GetString("COOLIFY_ENDPOINT")
 
 		fmt.Printf("\n%s %s deployed successfully!\n", color.GreenString("✓"), color.New(color.Bold).Sprint(appName))
 		if domains.Internal != "" {
@@ -132,10 +142,19 @@ Examples:
 			fmt.Printf("  External: https://%s\n", domains.External)
 		}
 
-		// Domain is now set automatically via the domains field in the PATCH call
-		// (using http:// prefix so Coolify generates plain HTTP Traefik labels that work
-		// with our central-Traefik→coolify-proxy:80 forwarding architecture).
-		_ = coolifyURL // retained for future use
+		// For non-Coolify apps (e.g. systemd-service, internet-agent, vpn-agent)
+		// the wildcard *.apps.mayencenouvelle.internal does NOT cover them.
+		// Print a manual step note if DNS is required.
+		if app.Spec.Capabilities.DNS && app.Spec.Type != "coolify-app" {
+			fmt.Printf("\n%s DNS rewrite required (AdGuard Home → Filters → DNS rewrites):\n",
+				color.YellowString("⚠"))
+			if domains.Internal != "" {
+				fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.Internal))
+			}
+			if domains.External != "" {
+				fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.External))
+			}
+		}
 		return nil
 	},
 }

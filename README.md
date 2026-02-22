@@ -45,9 +45,9 @@ Environment variables (required for deployment commands):
 
 | Variable               | Description                          |
 |------------------------|--------------------------------------|
-| `COOLIFY_ENDPOINT`     | Coolify base URL                     |
+| `COOLIFY_URL`          | Coolify base URL                     |
 | `COOLIFY_API_TOKEN`    | Coolify API token                    |
-| `AUTHENTIK_ENDPOINT`   | Authentik base URL                   |
+| `AUTHENTIK_URL`        | Authentik base URL                   |
 | `AUTHENTIK_API_TOKEN`  | Authentik API token                  |
 | `TRAEFIK_CONFIG_DIR`   | Path to Traefik dynamic config dir   |
 | `GITHUB_TOKEN`         | GitHub PAT (scope: admin:repo_hook)  |

@@ -60,11 +60,11 @@ Examples:
 		}
 
 		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
+			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 		authentikClient := authentik.NewClient(
-			viper.GetString("AUTHENTIK_ENDPOINT"),
+			viper.GetString("AUTHENTIK_URL"),
 			viper.GetString("AUTHENTIK_API_TOKEN"),
 		)
 		traefikClient := traefik.NewClient(
@@ -93,7 +93,7 @@ Examples:
 			// Authentik diff (only oidc apps)
 			if app.Spec.Capabilities.Auth == "oidc" {
 				printSection("Authentik")
-				authentikPlan, err := authentikClient.PlanOAuth2Provider(ctx, app)
+				authentikPlan, err := authentikClient.PlanOAuth2Provider(ctx, app, base)
 				if err != nil {
 					printError("Authentik", err)
 				} else {

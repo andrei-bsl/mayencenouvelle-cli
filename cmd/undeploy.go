@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/authentik"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
 	"github.com/spf13/cobra"
@@ -36,17 +37,18 @@ Examples:
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
-		// Load manifest just to validate the app name is known
+		// Load manifest to check auth capability
 		loader, err := manifest.NewLoader(manifestsDir)
 		if err != nil {
 			return fmt.Errorf("loading manifests: %w", err)
 		}
-		if _, err := loader.LoadApp(appName); err != nil {
+		app, err := loader.LoadApp(appName)
+		if err != nil {
 			return err
 		}
 
 		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
+			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 
@@ -68,10 +70,25 @@ Examples:
 				color.New(color.Bold).Sprint(appName),
 				svc.UUID,
 			)
-			fmt.Printf("  The domain will need to be set again after next deploy.\n")
+			if app.Spec.Capabilities.Auth == "oidc" {
+				fmt.Printf("  Authentik OAuth2 provider (%s) and application (%s) will also be removed.\n",
+					app.ProviderName(), app.AppSlug())
+			}
 			fmt.Printf("  Press Ctrl+C within 5s to abort...")
 			time.Sleep(5 * time.Second)
 			fmt.Println()
+
+			if app.Spec.Capabilities.Auth == "oidc" {
+				step("Authentik", fmt.Sprintf("Removing provider %s and application %s", app.ProviderName(), app.AppSlug()))
+				authentikClient := authentik.NewClient(
+					viper.GetString("AUTHENTIK_URL"),
+					viper.GetString("AUTHENTIK_API_TOKEN"),
+				)
+				if err := authentikClient.DeleteOIDC(ctx, appName); err != nil {
+					return fmt.Errorf("authentik delete: %w", err)
+				}
+				ok("Authentik", "OAuth2 provider and application removed")
+			}
 
 			step("Coolify", fmt.Sprintf("Deleting %s", appName))
 			if err := coolifyClient.Delete(ctx, svc.UUID); err != nil {

@@ -52,7 +52,7 @@ Examples:
 		// 1. Rotate in Authentik
 		step("Authentik", "Regenerating client credentials")
 		authentikClient := authentik.NewClient(
-			viper.GetString("AUTHENTIK_ENDPOINT"),
+			viper.GetString("AUTHENTIK_URL"),
 			viper.GetString("AUTHENTIK_API_TOKEN"),
 		)
 		creds, err := authentikClient.RotateOAuth2Secret(ctx, appName)
@@ -64,7 +64,7 @@ Examples:
 		// 2. Update Coolify env vars
 		step("Coolify", "Updating environment variables")
 		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
+			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 		svc, err := coolifyClient.GetAppByName(ctx, appName)

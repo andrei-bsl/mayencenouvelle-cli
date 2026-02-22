@@ -1,6 +1,8 @@
 // Package manifest provides types and loading for mnlab/v1 app manifests.
 package manifest
 
+import "strings"
+
 // AppConfig represents a parsed app manifest (apiVersion: mnlab/v1, kind: AppConfig).
 type AppConfig struct {
 	APIVersion string   `yaml:"apiVersion"`
@@ -35,9 +37,16 @@ type CoolifyBase struct {
 
 // AuthentikBase holds Authentik platform configuration.
 type AuthentikBase struct {
-	Endpoint     string   `yaml:"endpoint"`
-	AdminPath    string   `yaml:"admin_path"`
-	DefaultScopes []string `yaml:"default_scopes"`
+	Endpoint               string            `yaml:"endpoint"`
+	AdminPath              string            `yaml:"admin_path"`
+	DefaultScopes          []string          `yaml:"default_scopes"`
+	AuthorizationFlow      string            `yaml:"authorization_flow"`
+	PropertyMappings       map[string]string `yaml:"property_mappings"`
+	// InternalAltDomainSuffix is the alternate external domain suffix for internal apps.
+	// E.g. "internal.apps.mayencenouvelle.com" causes
+	// "vpn.apps.mayencenouvelle.internal" → also add "vpn.internal.apps.mayencenouvelle.com".
+	// Empty string disables this expansion.
+	InternalAltDomainSuffix string `yaml:"internal_alt_domain_suffix"`
 }
 
 // TraefikBase holds Traefik platform configuration.
@@ -131,10 +140,16 @@ type Env map[string]string
 
 // Auth holds OIDC/OAuth2 configuration.
 type Auth struct {
-	Scopes        []string `yaml:"scopes"`
-	RedirectPaths []string `yaml:"redirect_paths"`
-	LogoutURL     string   `yaml:"logout_url"`
-	AllowedGroups []string `yaml:"allowed_groups"`
+	// ClientType is the OAuth2 client type: "public" (PKCE, for SPAs) or
+	// "confidential" (client secret, for server-side apps). Default: "public".
+	ClientType     string   `yaml:"client_type"`
+	Scopes         []string `yaml:"scopes"`
+	RedirectPaths  []string `yaml:"redirect_paths"`
+	LogoutURL      string   `yaml:"logout_url"`
+	AllowedGroups  []string `yaml:"allowed_groups"`
+	// LocalhostPorts lists local dev server ports to include as redirect URI
+	// origins (http://localhost:{port}{redirect_path}). Useful for local dev.
+	LocalhostPorts []int    `yaml:"localhost_ports"`
 }
 
 // TraefikSpec holds app-specific Traefik overrides.
@@ -143,9 +158,53 @@ type TraefikSpec struct {
 	ExtraLabels map[string]string `yaml:"extra_labels"`
 }
 
-// ProviderName returns the generated Authentik OAuth2 provider name.
+// AppSlug returns the Authentik application slug: "mn-{name}".
+// Slugs are unique, kebab-case identifiers used for API lookup.
+func (a *AppConfig) AppSlug() string {
+	return "mn-" + a.Metadata.Name
+}
+
+// ProviderName returns the Authentik OAuth2 provider name: "mn-{name}-provider".
 func (a *AppConfig) ProviderName() string {
-	return a.Metadata.Name + "-oauth2"
+	return "mn-" + a.Metadata.Name + "-provider"
+}
+
+// AppDisplayName returns a human-readable display name for the Authentik application.
+// Derived by title-casing the app's metadata name (e.g. "vpn-app" → "Vpn App").
+// Authentik administrators can update the display name in the UI without affecting
+// the slug or provider lookup which are keyed on AppSlug() / ProviderName().
+func (a *AppConfig) AppDisplayName() string {
+	parts := strings.Split(a.Metadata.Name, "-")
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// AuthentikGroup returns the Authentik application library group for this app.
+// This determines how the app appears in the Authentik user dashboard.
+// Follows the workspace categorisation:
+//
+//	"internal" exposure → "Internal" (admin and ops tools)
+//	"external" / "both" → "Apps" (end-user facing)
+func (a *AppConfig) AuthentikGroup() string {
+	switch a.Spec.Capabilities.Exposure {
+	case "external", "both":
+		return "Apps"
+	default:
+		return "Internal"
+	}
+}
+
+// OAuth2ClientType returns the OAuth2 client type for Authentik provider creation.
+// Defaults to "public" (PKCE for SPAs) if not specified in the manifest.
+func (a *AppConfig) OAuth2ClientType() string {
+	if a.Spec.Auth.ClientType != "" {
+		return a.Spec.Auth.ClientType
+	}
+	return "public"
 }
 
 // Validate runs structural validation on the parsed manifest.

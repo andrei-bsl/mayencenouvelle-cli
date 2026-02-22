@@ -51,7 +51,7 @@ Examples:
 		}
 
 		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
+			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 

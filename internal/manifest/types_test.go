@@ -97,9 +97,9 @@ func TestProviderNameGeneration(t *testing.T) {
 		appName string
 		want    string
 	}{
-		{"nas-app", "nas-app-oauth2"},
-		{"vpn-app", "vpn-app-oauth2"},
-		{"internal-api", "internal-api-oauth2"},
+		{"nas-app", "mn-nas-app-provider"},
+			{"vpn-app", "mn-vpn-app-provider"},
+			{"internal-api", "mn-internal-api-provider"},
 	}
 
 	for _, tt := range tests {
