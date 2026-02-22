@@ -103,24 +103,14 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 			return nil, fmt.Errorf("create application: %w", err)
 		}
 
-		// Now update with FQDN (can't be set on create)
-		created := &App{UUID: resp.UUID, Name: app.Metadata.Name}
-		if fqdn := buildFQDN(app); fqdn != "" {
-			updatePayload := map[string]interface{}{"fqdn": fqdn}
-			var updated App
-			if err := c.http.Patch(ctx, "/api/v1/applications/"+resp.UUID, updatePayload, &updated); err != nil {
-				return nil, fmt.Errorf("set fqdn: %w", err)
-			}
-		}
-		return created, nil
+		// fqdn is set during creation in buildCoolifyCreatePayload
+		// It cannot be updated via PATCH after creation (Coolify API limitation)
+		return &App{UUID: resp.UUID, Name: app.Metadata.Name}, nil
 	}
 
 	// Update existing service - use different payload (immutable fields not allowed)
+	// Note: fqdn cannot be updated after creation in Coolify API
 	payload := buildCoolifyUpdatePayload(app)
-	// Also update FQDN if specified
-	if fqdn := buildFQDN(app); fqdn != "" {
-		payload["fqdn"] = fqdn
-	}
 	var updated App
 	if err := c.http.Patch(ctx, "/api/v1/applications/"+existing.UUID, payload, &updated); err != nil {
 		return nil, fmt.Errorf("update application: %w", err)
@@ -227,7 +217,7 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 	// Get environment name based on branch + exposure (development-internal, development, etc.)
 	envName := app.GetEnvironmentStage()
 
-	return map[string]interface{}{
+	payload := map[string]interface{}{
 		// Required fields for /api/v1/applications/public
 		"project_uuid":     base.Coolify.ProjectUUID,
 		"environment_name": envName,
@@ -242,6 +232,13 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 		// Optional fields
 		"dockerfile_location": app.Spec.Build.Dockerfile,
 	}
+
+	// Add FQDN if specified (can only be set at creation, not updated later)
+	if fqdn := buildFQDN(app); fqdn != "" {
+		payload["fqdn"] = fqdn
+	}
+
+	return payload
 }
 
 // mapEnvironment maps branch + exposure to Coolify environment name
