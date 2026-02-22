@@ -151,6 +151,15 @@ type Auth struct {
 	// LocalhostPorts lists local dev server ports to include as redirect URI
 	// origins (http://localhost:{port}{redirect_path}). Useful for local dev.
 	LocalhostPorts []int    `yaml:"localhost_ports"`
+	// RedirectURIs is an optional explicit list of full redirect URIs.
+	// When set, these are sent to Authentik verbatim (all strict matching) and
+	// the auto-derivation from domains + redirect_paths is skipped entirely.
+	// Use this when the auto-generated URIs do not match your requirements.
+	// Example:
+	//   redirect_uris:
+	//     - https://hello-world.apps.mayencenouvelle.internal/auth/callback
+	//     - https://custom.example.com/callback
+	RedirectURIs   []string `yaml:"redirect_uris"`
 }
 
 // TraefikSpec holds app-specific Traefik overrides.

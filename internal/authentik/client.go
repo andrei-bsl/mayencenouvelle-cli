@@ -348,16 +348,28 @@ func (c *Client) patchApplication(ctx context.Context, slug string, providerPK i
 }
 
 // buildRedirectURIs builds the full list of redirect URIs for an app.
-// Includes:
+//
+// If spec.authentication.redirect_uris is non-empty, those exact strings are
+// used verbatim (all strict matching) and all auto-derivation is skipped.
+//
+// Otherwise the URIs are derived automatically from the app's domains:
 //   - Stage-prefixed internal domain (e.g. dev-vpn.apps.mayencenouvelle.internal)
 //   - Canonical internal domain (e.g. vpn.apps.mayencenouvelle.internal)
 //   - Alternate external domain for internal apps if base.Authentik.InternalAltDomainSuffix is set
 //     (e.g. vpn.internal.apps.mayencenouvelle.com / dev-vpn.internal.apps.mayencenouvelle.com)
 //   - External domains if exposure == external/both
-//   - Localhost entries if manifest.spec.authentication.localhost_ports is set
+//   - Localhost entries if spec.authentication.localhost_ports is set
 //
 // This produces a URI set that covers dev, prod, and local development from a single provider.
 func buildRedirectURIs(app *manifest.AppConfig, base *manifest.BaseConfig) []RedirectURI {
+	// Explicit override: use manifest-specified URIs verbatim.
+	if len(app.Spec.Auth.RedirectURIs) > 0 {
+		uris := make([]RedirectURI, 0, len(app.Spec.Auth.RedirectURIs))
+		for _, u := range app.Spec.Auth.RedirectURIs {
+			uris = append(uris, RedirectURI{MatchingMode: "strict", URL: u})
+		}
+		return uris
+	}
 	stageDomains := app.GetDomains()  // stage-aware (dev-* prefix for develop branch)
 	specDomains := app.Spec.Domains  // canonical (no dev- prefix)
 	altSuffix := ""
