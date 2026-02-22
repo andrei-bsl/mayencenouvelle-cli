@@ -112,12 +112,13 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 
 	// Update existing service - immutable fields (project_uuid, environment_name, etc.) excluded.
 	// Note: fqdn cannot be set via the Coolify API - domain routing is handled by Traefik.
+	// The PATCH response body does not include fqdn, so we return the pre-fetched existing
+	// record which was populated from the list endpoint (includes fqdn, status, etc.).
 	payload := buildCoolifyUpdatePayload(app)
-	var updated App
-	if err := c.http.Patch(ctx, "/api/v1/applications/"+existing.UUID, payload, &updated); err != nil {
+	if err := c.http.Patch(ctx, "/api/v1/applications/"+existing.UUID, payload, nil); err != nil {
 		return nil, fmt.Errorf("update application: %w", err)
 	}
-	return &updated, nil
+	return existing, nil
 }
 
 // UpdateEnvVars merges the given env var map into the Coolify service configuration.
