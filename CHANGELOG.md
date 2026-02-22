@@ -13,26 +13,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `--delete` flag: permanently removes the app with a 5s abort window
   - Handles "not found in Coolify" gracefully (exits 0 with a warning)
 - `Stop()` and `Delete()` methods on the Coolify client
-- Post-deploy FQDN reminder: warns when the domain isn't configured yet in Coolify UI
-  after a first deploy (fires only when `fqdn` is genuinely unset)
+- Automated domain configuration: `EnsureApp` now sets the `domains` field via PATCH
+  after creation and on every update — no manual "set domain in Coolify UI" step required.
+  Uses `http://` prefix so Coolify generates plain HTTP Traefik labels compatible with the
+  central-Traefik→coolify-proxy:80 forwarding architecture (not `https://` which would
+  add a `redirect-to-https` + `letsencrypt` router and cause a redirect loop).
 
 ### Fixed
 - `WaitForHealthy`: now accepts `"running:healthy"` status in addition to `"running"` —
   Coolify returns the former and the CLI was timing out on every deploy
 - `EnsureApp` (update path): returns the pre-fetched `existing` app record instead of the
   PATCH response body — Coolify PATCH omits `name` and `fqdn`, causing blank fields
-- FQDN mismatch warning: normalises `http://` vs `https://` before comparing — Coolify
-  stores `http://` internally; the warning no longer fires on every run after first deploy
 - `deploy` output: service name now shown correctly in `✓ [Coolify] service <name> ready`
 
 ### Removed
+- Manual FQDN warning block from `deploy.go`: domain is now set automatically, making the
+  "Manual step required" prompt obsolete
 - Traefik config file generation from the deploy pipeline: the CLI was writing a
   `<app>.yaml` file to the Traefik dynamic config directory on each deploy, which
   is not scalable and diverges from how vpn-app and internal-api are configured.
   Routing is handled by the existing wildcard rule in `coolify-forward.yml`.
+- `strings` import from `cmd/deploy.go` (was used for FQDN scheme normalisation in the
+  now-removed manual warning block)
 
 ### Changed
-- `strings` added to `cmd/deploy.go` imports (scheme normalisation for FQDN check)
 - `deploy` command description updated to reflect that Traefik config is no longer written
 
 ---
