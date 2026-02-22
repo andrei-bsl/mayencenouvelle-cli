@@ -41,6 +41,7 @@ type App struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
 	Status     string    `json:"status"` // running | stopped | building | error
+	FQDN       string    `json:"fqdn"`   // Set manually in Coolify UI; API cannot set this
 	Repository string    `json:"repository"`
 	Branch     string    `json:"branch"`
 	CreatedAt  time.Time `json:"created_at"`

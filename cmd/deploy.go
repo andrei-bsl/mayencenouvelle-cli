@@ -121,12 +121,24 @@ Examples:
 		ok("Health", "service is healthy")
 
 		// ── Done ────────────────────────────────────────────────────────────────
+		domains := app.GetDomains()
+		coolifyURL := viper.GetString("COOLIFY_ENDPOINT")
+
 		fmt.Printf("\n%s %s deployed successfully!\n", color.GreenString("✓"), color.New(color.Bold).Sprint(appName))
-		if app.Spec.Domains.Internal != "" {
-			fmt.Printf("  Internal: https://%s\n", app.Spec.Domains.Internal)
+		if domains.Internal != "" {
+			fmt.Printf("  Internal: https://%s\n", domains.Internal)
 		}
-		if app.Spec.Domains.External != "" {
-			fmt.Printf("  External: https://%s\n", app.Spec.Domains.External)
+		if domains.External != "" {
+			fmt.Printf("  External: https://%s\n", domains.External)
+		}
+
+		// Warn if the FQDN in Coolify doesn't match the expected domain (first deploy only)
+		expectedFQDN := "https://" + domains.Internal
+		if svc.FQDN != expectedFQDN {
+			fmt.Printf("\n%s Manual step required (first deploy only):\n", color.YellowString("⚠"))
+			fmt.Printf("  Set the domain in Coolify UI → %s → Settings → Domains:\n", appName)
+			fmt.Printf("  %s\n", color.CyanString(expectedFQDN))
+			fmt.Printf("  Coolify UI: %s\n", coolifyURL)
 		}
 		return nil
 	},
