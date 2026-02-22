@@ -116,19 +116,22 @@ func (c *Client) PlanRoutes(app *manifest.AppConfig) ([]PlanAction, error) {
 		op = "update"
 	}
 
+	// Use GetDomains() to apply stage-based domain transformations (e.g., dev- prefix)
+	domains := app.GetDomains()
+
 	var actions []PlanAction
-	if app.Spec.Domains.Internal != "" {
+	if domains.Internal != "" {
 		actions = append(actions, PlanAction{
 			Operation: op,
 			Resource:  "Traefik Router (internal)",
-			Detail:    fmt.Sprintf("Host(`%s`)", app.Spec.Domains.Internal),
+			Detail:    fmt.Sprintf("Host(`%s`)", domains.Internal),
 		})
 	}
-	if app.Spec.Domains.External != "" {
+	if domains.External != "" {
 		actions = append(actions, PlanAction{
 			Operation: op,
 			Resource:  "Traefik Router (external)",
-			Detail:    fmt.Sprintf("Host(`%s`) + Let's Encrypt TLS", app.Spec.Domains.External),
+			Detail:    fmt.Sprintf("Host(`%s`) + Let's Encrypt TLS", domains.External),
 		})
 	}
 	return actions, nil
@@ -155,8 +158,11 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 		middlewares = []string{"compress"} // safe default
 	}
 
+	// Use GetDomains() to apply stage-based domain transformations (e.g., dev- prefix)
+	domains := app.GetDomains()
+
 	// Internal router
-	if app.Spec.Domains.Internal != "" &&
+	if domains.Internal != "" &&
 		(app.Spec.Capabilities.Exposure == "internal" || app.Spec.Capabilities.Exposure == "both") {
 
 		certResolver := ""
@@ -165,7 +171,7 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 		}
 
 		r := router{
-			Rule:        fmt.Sprintf("Host(`%s`)", app.Spec.Domains.Internal),
+			Rule:        fmt.Sprintf("Host(`%s`)", domains.Internal),
 			Service:     svcName,
 			Entrypoints: []string{"websecure"},
 			Middlewares: middlewares,
@@ -177,11 +183,11 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 	}
 
 	// External router — ALWAYS uses Let's Encrypt and may have different middleware
-	if app.Spec.Domains.External != "" &&
+	if domains.External != "" &&
 		(app.Spec.Capabilities.Exposure == "external" || app.Spec.Capabilities.Exposure == "both") {
 
 		routers[app.Metadata.Name+"-external"] = router{
-			Rule:        fmt.Sprintf("Host(`%s`)", app.Spec.Domains.External),
+			Rule:        fmt.Sprintf("Host(`%s`)", domains.External),
 			Service:     svcName,
 			Entrypoints: []string{"websecure"},
 			Middlewares: middlewares,

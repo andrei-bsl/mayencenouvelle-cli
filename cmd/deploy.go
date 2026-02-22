@@ -49,6 +49,10 @@ Examples:
 		if err != nil {
 			return err
 		}
+		base, err := loader.LoadBase()
+		if err != nil {
+			return fmt.Errorf("loading base config: %w", err)
+		}
 		if errs := app.Validate(); len(errs) > 0 {
 			for _, e := range errs {
 				fmt.Printf("  ✗ %s\n", e)
@@ -92,11 +96,16 @@ Examples:
 			app.Spec.Environment[app.Metadata.Name+"_AUTHENTIK_CLIENT_ID"] = clientID
 			app.Spec.Environment[app.Metadata.Name+"_AUTHENTIK_CLIENT_SECRET"] = clientSecret
 		}
-		svc, err := coolifyClient.EnsureApp(ctx, app)
+		svc, err := coolifyClient.EnsureApp(ctx, app, base)
 		if err != nil {
 			return fmt.Errorf("coolify: %w", err)
 		}
-		ok("Coolify", fmt.Sprintf("service %s ready (id: %s)", svc.Name, svc.ID))
+		// Use UUID for API operations (Coolify returns uuid, not id)
+		appID := svc.UUID
+		if appID == "" {
+			appID = svc.ID
+		}
+		ok("Coolify", fmt.Sprintf("service %s ready (uuid: %s)", svc.Name, appID))
 
 		// ── 4. Traefik routes ─────────────────────────────────────────────────
 		step("Traefik", "Generating router configuration")
@@ -108,13 +117,13 @@ Examples:
 
 		// ── 5. Trigger Coolify deploy ─────────────────────────────────────────
 		step("Coolify", "Triggering deployment")
-		if err := coolifyClient.Deploy(ctx, svc.ID); err != nil {
+		if err := coolifyClient.Deploy(ctx, appID); err != nil {
 			return fmt.Errorf("coolify deploy: %w", err)
 		}
 
 		// ── 6. Wait for healthy ────────────────────────────────────────────────
 		step("Health", fmt.Sprintf("Waiting for %s to become healthy", app.Spec.Domains.Internal))
-		if err := coolifyClient.WaitForHealthy(ctx, svc.ID, 2*time.Minute); err != nil {
+		if err := coolifyClient.WaitForHealthy(ctx, appID, 2*time.Minute); err != nil {
 			return fmt.Errorf("health check failed: %w", err)
 		}
 		ok("Health", "service is healthy")

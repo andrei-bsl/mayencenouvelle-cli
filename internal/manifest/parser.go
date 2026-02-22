@@ -31,6 +31,22 @@ func (l *Loader) LoadApp(name string) (*AppConfig, error) {
 	return l.loadFile(path)
 }
 
+// LoadBase reads the base.yaml global configuration.
+func (l *Loader) LoadBase() (*BaseConfig, error) {
+	path := filepath.Join(l.manifestsDir, "base.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading base.yaml: %w", err)
+	}
+
+	var base BaseConfig
+	if err := yaml.Unmarshal(data, &base); err != nil {
+		return nil, fmt.Errorf("parsing base.yaml: %w", err)
+	}
+
+	return &base, nil
+}
+
 // LoadAll reads all .yaml files in the apps directory.
 func (l *Loader) LoadAll() ([]*AppConfig, error) {
 	entries, err := os.ReadDir(l.appsDir)

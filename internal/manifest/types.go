@@ -9,6 +9,56 @@ type AppConfig struct {
 	Spec       Spec     `yaml:"spec"`
 }
 
+// BaseConfig represents the base.yaml global configuration.
+// It contains platform-wide settings inherited by all app manifests.
+type BaseConfig struct {
+	Version      string       `yaml:"version"`
+	Updated      string       `yaml:"updated"`
+	Organization string       `yaml:"organization"`
+	LabName      string       `yaml:"lab_name"`
+	Coolify      CoolifyBase  `yaml:"coolify"`
+	Authentik    AuthentikBase `yaml:"authentik"`
+	Traefik      TraefikBase  `yaml:"traefik"`
+	DNS          DNSBase      `yaml:"dns"`
+	GitHub       GitHubBase   `yaml:"github"`
+}
+
+// CoolifyBase holds Coolify platform configuration.
+type CoolifyBase struct {
+	Project        string `yaml:"project"`
+	ProjectUUID    string `yaml:"project_uuid"`
+	Environment    string `yaml:"environment"`
+	Endpoint       string `yaml:"endpoint"`
+	ServerUUID     string `yaml:"server_uuid"`
+	DestinationUUID string `yaml:"destination_uuid"`
+}
+
+// AuthentikBase holds Authentik platform configuration.
+type AuthentikBase struct {
+	Endpoint     string   `yaml:"endpoint"`
+	AdminPath    string   `yaml:"admin_path"`
+	DefaultScopes []string `yaml:"default_scopes"`
+}
+
+// TraefikBase holds Traefik platform configuration.
+type TraefikBase struct {
+	AdminEndpoint string            `yaml:"admin_endpoint"`
+	Entrypoints   map[string]string `yaml:"entrypoints"`
+	InternalIP    string            `yaml:"internal_ip"`
+}
+
+// DNSBase holds DNS platform configuration.
+type DNSBase struct {
+	Provider       string `yaml:"provider"`
+	Endpoint       string `yaml:"endpoint"`
+	InternalTarget string `yaml:"internal_target"`
+}
+
+// GitHubBase holds GitHub platform configuration.
+type GitHubBase struct {
+	Organization string `yaml:"organization"`
+}
+
 // Metadata holds identifying information about the app.
 type Metadata struct {
 	Name        string            `yaml:"name"`
@@ -144,4 +194,63 @@ func (a *AppConfig) Validate() []string {
 	}
 
 	return errs
+}
+// GetEnvironmentStage returns the Coolify environment name based on branch + exposure.
+// Maps:
+//   - develop + internal -> "development-internal"
+//   - develop + external/both -> "development"
+//   - main/master + internal -> "production-internal"
+//   - main/master + external/both -> "production"
+func (a *AppConfig) GetEnvironmentStage() string {
+	branch := a.Spec.Repository.Branch
+	exposure := a.Spec.Capabilities.Exposure
+
+	isProduction := branch == "main" || branch == "master"
+	isInternal := exposure == "internal"
+
+	switch {
+	case isProduction && isInternal:
+		return "production-internal"
+	case isProduction && !isInternal:
+		return "production"
+	case !isProduction && isInternal:
+		return "development-internal"
+	default:
+		return "development"
+	}
+}
+
+// GetDomains returns the actual domains used for deployment, applying stage-based prefixing.
+// For development environments, prepends "dev-" to domain names (per ADR-016).
+// Example: internal app on develop branch: "hello-world.apps.mayencenouvelle.internal"
+//          becomes "dev-hello-world.apps.mayencenouvelle.internal"
+func (a *AppConfig) GetDomains() Domains {
+	domains := a.Spec.Domains
+	stage := a.GetEnvironmentStage()
+
+	// Development-stage apps get "dev-" prefix
+	isDevelopment := stage == "development" || stage == "development-internal"
+	if isDevelopment {
+		if domains.Internal != "" {
+			domains.Internal = prefixDomain(domains.Internal, "dev-")
+		}
+		if domains.External != "" {
+			domains.External = prefixDomain(domains.External, "dev-")
+		}
+	}
+
+	return domains
+}
+
+// prefixDomain adds a prefix to a domain name (before the first dot).
+// Example: prefixDomain("hello.apps.mayencenouvelle.internal", "dev-") -> "dev-hello.apps.mayencenouvelle.internal"
+func prefixDomain(domain, prefix string) string {
+	// Find the first dot
+	for i, ch := range domain {
+		if ch == '.' {
+			return prefix + domain[:i] + domain[i:]
+		}
+	}
+	// No dot found, just prefix the whole thing
+	return prefix + domain
 }

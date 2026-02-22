@@ -40,6 +40,11 @@ Examples:
 			return fmt.Errorf("loading manifests: %w", err)
 		}
 
+		base, err := loader.LoadBase()
+		if err != nil {
+			return fmt.Errorf("loading base config: %w", err)
+		}
+
 		var apps []*manifest.AppConfig
 		if len(args) == 1 {
 			app, err := loader.LoadApp(args[0])
@@ -76,7 +81,7 @@ Examples:
 
 			// Coolify diff
 			printSection("Coolify")
-			coolifyPlan, err := coolifyClient.PlanApp(ctx, app)
+			coolifyPlan, err := coolifyClient.PlanApp(ctx, app, base)
 			if err != nil {
 				printError("Coolify", err)
 			} else {

@@ -37,6 +37,7 @@ func NewClient(endpoint, token string) *Client {
 
 // App represents a Coolify service/application.
 type App struct {
+	UUID       string    `json:"uuid"` // Coolify returns uuid, not id
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
 	Status     string    `json:"status"` // running | stopped | building | error
@@ -83,26 +84,45 @@ func (c *Client) GetAppByName(ctx context.Context, name string) (*App, error) {
 
 // EnsureApp creates or updates a Coolify service for the given app manifest.
 // Idempotent: if the service already exists with the same config, no update is made.
-func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig) (*App, error) {
+// Requires base config for Coolify UUIDs (project, server, destination).
+func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *manifest.BaseConfig) (*App, error) {
 	existing, err := c.GetAppByName(ctx, app.Metadata.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	payload := buildCoolifyPayload(app)
-
 	if existing == nil {
-		// Create new service
-		var created App
-		if err := c.http.Post(ctx, "/api/v1/applications", payload, &created); err != nil {
+		// Create new service via /api/v1/applications/public endpoint
+		// Response format: {"uuid": "...", "domains": "..."}
+		payload := buildCoolifyCreatePayload(app, base)
+		var resp struct {
+			UUID    string `json:"uuid"`
+			Domains string `json:"domains"`
+		}
+		if err := c.http.Post(ctx, "/api/v1/applications/public", payload, &resp); err != nil {
 			return nil, fmt.Errorf("create application: %w", err)
 		}
-		return &created, nil
+
+		// Now update with FQDN (can't be set on create)
+		created := &App{UUID: resp.UUID, Name: app.Metadata.Name}
+		if fqdn := buildFQDN(app); fqdn != "" {
+			updatePayload := map[string]interface{}{"fqdn": fqdn}
+			var updated App
+			if err := c.http.Patch(ctx, "/api/v1/applications/"+resp.UUID, updatePayload, &updated); err != nil {
+				return nil, fmt.Errorf("set fqdn: %w", err)
+			}
+		}
+		return created, nil
 	}
 
-	// Update existing service
+	// Update existing service - use different payload (immutable fields not allowed)
+	payload := buildCoolifyUpdatePayload(app)
+	// Also update FQDN if specified
+	if fqdn := buildFQDN(app); fqdn != "" {
+		payload["fqdn"] = fqdn
+	}
 	var updated App
-	if err := c.http.Patch(ctx, "/api/v1/applications/"+existing.ID, payload, &updated); err != nil {
+	if err := c.http.Patch(ctx, "/api/v1/applications/"+existing.UUID, payload, &updated); err != nil {
 		return nil, fmt.Errorf("update application: %w", err)
 	}
 	return &updated, nil
@@ -128,9 +148,10 @@ func (c *Client) UpdateEnvVars(ctx context.Context, serviceID string, vars map[s
 }
 
 // Deploy triggers an immediate deployment of the given service.
-func (c *Client) Deploy(ctx context.Context, serviceID string) error {
-	// POST /api/v1/applications/{id}/deploy
-	if err := c.http.Post(ctx, "/api/v1/applications/"+serviceID+"/deploy", nil, nil); err != nil {
+// Uses the /api/v1/deploy endpoint with uuid query parameter.
+func (c *Client) Deploy(ctx context.Context, serviceUUID string) error {
+	// POST /api/v1/deploy?uuid={uuid}
+	if err := c.http.Post(ctx, "/api/v1/deploy?uuid="+serviceUUID, nil, nil); err != nil {
 		return fmt.Errorf("trigger deploy: %w", err)
 	}
 	return nil
@@ -175,7 +196,7 @@ func (c *Client) WaitForHealthy(ctx context.Context, serviceID string, timeout t
 }
 
 // PlanApp returns a dry-run preview of what EnsureApp would change.
-func (c *Client) PlanApp(ctx context.Context, app *manifest.AppConfig) ([]PlanAction, error) {
+func (c *Client) PlanApp(ctx context.Context, app *manifest.AppConfig, base *manifest.BaseConfig) ([]PlanAction, error) {
 	existing, err := c.GetAppByName(ctx, app.Metadata.Name)
 	if err != nil {
 		return nil, err
@@ -184,6 +205,8 @@ func (c *Client) PlanApp(ctx context.Context, app *manifest.AppConfig) ([]PlanAc
 		return []PlanAction{
 			{Operation: "create", Resource: "Coolify Application", Detail: app.Metadata.Name},
 			{Operation: "create", Resource: "Environment Variables", Detail: fmt.Sprintf("%d vars", len(app.Spec.Environment))},
+			{Operation: "set", Resource: "Project", Detail: base.Coolify.Project},
+			{Operation: "set", Resource: "Environment", Detail: base.Coolify.Environment},
 		}, nil
 	}
 	return []PlanAction{
@@ -193,14 +216,112 @@ func (c *Client) PlanApp(ctx context.Context, app *manifest.AppConfig) ([]PlanAc
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-func buildCoolifyPayload(app *manifest.AppConfig) map[string]interface{} {
-	return map[string]interface{}{
-		"name":          app.Metadata.Name,
-		"repository":    app.Spec.Repository.URL,
-		"branch":        app.Spec.Repository.Branch,
-		"build_command": app.Spec.Build.Command,
-		"base_image":    app.Spec.Build.BaseImage,
-		"port":          app.Spec.Runtime.Port,
-		"environment":   app.Spec.Environment,
+// buildCoolifyCreatePayload builds payload for POST /api/v1/applications/public
+func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfig) map[string]interface{} {
+	// Determine build pack: dockerfile if specified, otherwise nixpacks
+	buildPack := "nixpacks"
+	if app.Spec.Build.Dockerfile != "" || app.Spec.Build.BaseImage != "" {
+		buildPack = "dockerfile"
 	}
+
+	// Get environment name based on branch + exposure (development-internal, development, etc.)
+	envName := app.GetEnvironmentStage()
+
+	return map[string]interface{}{
+		// Required fields for /api/v1/applications/public
+		"project_uuid":     base.Coolify.ProjectUUID,
+		"environment_name": envName,
+		"server_uuid":      base.Coolify.ServerUUID,
+		"destination_uuid": base.Coolify.DestinationUUID,
+		"git_repository":   app.Spec.Repository.URL,
+		"git_branch":       app.Spec.Repository.Branch,
+		"build_pack":       buildPack,
+		"ports_exposes":    fmt.Sprintf("%d", app.Spec.Runtime.Port),
+		"name":             app.Metadata.Name,
+
+		// Optional fields
+		"dockerfile_location": app.Spec.Build.Dockerfile,
+	}
+}
+
+// mapEnvironment maps branch + exposure to Coolify environment name
+func mapEnvironment(branch, exposure string) string {
+	isProduction := branch == "main" || branch == "master"
+	isInternal := exposure == "internal"
+
+	switch {
+	case isProduction && isInternal:
+		return "production-internal"
+	case isProduction && !isInternal:
+		return "production"
+	case !isProduction && isInternal:
+		return "development-internal"
+	default:
+		return "development"
+	}
+}
+
+// buildCoolifyUpdatePayload builds payload for PATCH /api/v1/applications/{uuid}
+// Note: project_uuid, environment_name, server_uuid, destination_uuid are immutable
+func buildCoolifyUpdatePayload(app *manifest.AppConfig) map[string]interface{} {
+	// Determine build pack: dockerfile if specified, otherwise nixpacks
+	buildPack := "nixpacks"
+	if app.Spec.Build.Dockerfile != "" || app.Spec.Build.BaseImage != "" {
+		buildPack = "dockerfile"
+	}
+
+	return map[string]interface{}{
+		"name":                app.Metadata.Name,
+		"git_branch":          app.Spec.Repository.Branch,
+		"build_pack":          buildPack,
+		"ports_exposes":       fmt.Sprintf("%d", app.Spec.Runtime.Port),
+		"dockerfile_location": app.Spec.Build.Dockerfile,
+	}
+}
+
+// buildFQDN constructs the fully qualified domain name for the app.
+// Format for internal apps:
+//   - development: http://dev-{app}.apps.mayencenouvelle.internal,http://dev-{app}.internal.apps.mayencenouvelle.com
+//   - production: http://{app}.apps.mayencenouvelle.internal,http://{app}.internal.apps.mayencenouvelle.com
+// Format for external apps:
+//   - development: https://dev-{app}.apps.mayencenouvelle.com
+//   - production: https://{app}.apps.mayencenouvelle.com
+func buildFQDN(app *manifest.AppConfig) string {
+	name := app.Metadata.Name
+	isProduction := app.Spec.Repository.Branch == "main" || app.Spec.Repository.Branch == "master"
+	isInternal := app.Spec.Capabilities.Exposure == "internal"
+
+	// Determine environment prefix
+	envPrefix := ""
+	if !isProduction {
+		envPrefix = "dev-"
+	}
+
+	// Use explicit domain from manifest if provided, with env prefix
+	if isInternal && app.Spec.Domains.Internal != "" {
+		domain := app.Spec.Domains.Internal
+		// Prepend env prefix if not production
+		if envPrefix != "" {
+			domain = envPrefix + domain
+		}
+		// For internal apps, also add the alternate domain
+		// Extract just the app name part and construct alternate domain
+		altDomain := fmt.Sprintf("%s%s.internal.apps.mayencenouvelle.com", envPrefix, name)
+		return fmt.Sprintf("http://%s,http://%s", domain, altDomain)
+	}
+
+	if !isInternal && app.Spec.Domains.External != "" {
+		domain := app.Spec.Domains.External
+		if envPrefix != "" {
+			domain = envPrefix + domain
+		}
+		return fmt.Sprintf("https://%s", domain)
+	}
+
+	// Generate default domain based on exposure
+	if isInternal {
+		return fmt.Sprintf("http://%s%s.apps.mayencenouvelle.internal,http://%s%s.internal.apps.mayencenouvelle.com",
+			envPrefix, name, envPrefix, name)
+	}
+	return fmt.Sprintf("https://%s%s.apps.mayencenouvelle.com", envPrefix, name)
 }
