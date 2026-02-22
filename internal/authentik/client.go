@@ -308,6 +308,7 @@ func (c *Client) createOAuth2Provider(
 		"redirect_uris":     redirectURIs,
 		"issuer_mode":       "per_provider",
 		"authorization_flow": base.Authentik.AuthorizationFlow,
+		"invalidation_flow":  base.Authentik.InvalidationFlow,
 		"property_mappings": propertyMappings,
 	}
 	var provider OAuth2Provider
