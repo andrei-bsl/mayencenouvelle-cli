@@ -166,7 +166,8 @@ func (c *Client) RollbackToDeployment(ctx context.Context, serviceID, deployment
 	return nil
 }
 
-// WaitForHealthy polls the service status until it is "running" or timeout.
+// WaitForHealthy polls the service status until it is running or timeout.
+// Coolify returns statuses like "running", "running:healthy", "running:unhealthy".
 func (c *Client) WaitForHealthy(ctx context.Context, serviceID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -174,7 +175,8 @@ func (c *Client) WaitForHealthy(ctx context.Context, serviceID string, timeout t
 		if err := c.http.Get(ctx, "/api/v1/applications/"+serviceID, &app); err != nil {
 			return err
 		}
-		if app.Status == "running" {
+		// Accept "running" or "running:healthy" — reject "running:unhealthy"
+		if app.Status == "running:healthy" || app.Status == "running" {
 			return nil
 		}
 		select {
