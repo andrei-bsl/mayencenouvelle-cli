@@ -9,6 +9,8 @@ package coolify
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -37,15 +39,21 @@ func NewClient(endpoint, token string) *Client {
 
 // App represents a Coolify service/application.
 type App struct {
-	UUID       string    `json:"uuid"` // Coolify returns uuid, not id
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Status     string    `json:"status"` // running | stopped | building | error
-	FQDN       string    `json:"fqdn"`   // Set manually in Coolify UI; API cannot set this
-	Repository string    `json:"repository"`
-	Branch     string    `json:"branch"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	UUID                      string    `json:"uuid"` // Coolify returns uuid, not id
+	ID                        string    `json:"id"`
+	Name                      string    `json:"name"`
+	Status                    string    `json:"status"` // running | stopped | building | error
+	FQDN                      string    `json:"fqdn"`   // Set manually in Coolify UI; API cannot set this
+	Repository                string    `json:"repository"`
+	Branch                    string    `json:"git_branch"`
+	// ManualWebhookSecretGithub is Coolify's auto-generated token for this resource.
+	// It serves dual purpose:
+	//   1. URL token  → {coolify_url}/webhooks/source/github/events/manual?token={value}
+	//   2. HMAC secret → Coolify uses it to verify GitHub's X-Hub-Signature-256 header
+	// No extra secret management needed — read from Coolify API at deploy time.
+	ManualWebhookSecretGithub string    `json:"manual_webhook_secret_github"`
+	CreatedAt                 time.Time `json:"created_at"`
+	UpdatedAt                 time.Time `json:"updated_at"`
 }
 
 // Deployment represents a single Coolify deployment event.
@@ -69,18 +77,70 @@ type PlanAction struct {
 // GetAppByName retrieves a Coolify service by its name.
 // Returns nil, nil if no service with that name exists.
 func (c *Client) GetAppByName(ctx context.Context, name string) (*App, error) {
-	// GET /api/v1/applications
-	// Filter by name client-side (Coolify list endpoint)
+	apps, err := c.GetAppsByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(apps) == 0 {
+		return nil, nil
+	}
+	return &apps[0], nil
+}
+
+// GetAppsByName returns ALL Coolify application resources with the given name
+// across all environments (development-internal, production-internal, etc.).
+// Multiple resources exist when the same app is deployed for both develop and main branches.
+// Each matching app is fetched individually to ensure full data (e.g. ManualWebhookSecretGithub
+// is omitted from the list response but present in the individual GET response).
+func (c *Client) GetAppsByName(ctx context.Context, name string) ([]App, error) {
 	var apps []App
 	if err := c.http.Get(ctx, "/api/v1/applications", &apps); err != nil {
 		return nil, fmt.Errorf("list applications: %w", err)
 	}
+	var result []App
 	for _, a := range apps {
-		if a.Name == name {
-			return &a, nil
+		if a.Name != name {
+			continue
+		}
+		// Fetch individual app to get full data including ManualWebhookSecretGithub.
+		// The list endpoint may omit sensitive fields — individual GET is authoritative.
+		var full App
+		if err := c.http.Get(ctx, "/api/v1/applications/"+a.UUID, &full); err == nil {
+			result = append(result, full)
+		} else {
+			result = append(result, a) // fallback to partial list data
 		}
 	}
-	return nil, nil
+	return result, nil
+}
+
+// EnsureWebhookToken guarantees the Coolify resource has a manual_webhook_secret_github token.
+// If the token is already set, it is returned unchanged.
+// If missing (e.g. app created without GitHub integration), a 64-char hex token is generated
+// and PATCHed to Coolify. The updated token is stored back on the App struct.
+func (c *Client) EnsureWebhookToken(ctx context.Context, app *App) (string, error) {
+	if app.ManualWebhookSecretGithub != "" {
+		return app.ManualWebhookSecretGithub, nil
+	}
+	// Generate a cryptographically random 64-char hex token (32 bytes → 64 hex chars).
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate webhook token: %w", err)
+	}
+	hexToken := hex.EncodeToString(raw)
+	payload := map[string]interface{}{"manual_webhook_secret_github": hexToken}
+	if err := c.http.Patch(ctx, "/api/v1/applications/"+app.UUID, payload, nil); err != nil {
+		return "", fmt.Errorf("set webhook token for %s: %w", app.UUID, err)
+	}
+	app.ManualWebhookSecretGithub = hexToken
+	return hexToken, nil
+}
+
+// WebhookURL builds the Coolify GitHub webhook delivery URL for an app resource.
+// token is the resource's ManualWebhookSecretGithub value.
+// The same token is also used as the HMAC signing secret for GitHub's X-Hub-Signature-256.
+func (c *Client) WebhookURL(token string) string {
+	return c.endpoint + "/webhooks/source/github/events/manual?token=" + token
 }
 
 // EnsureApp creates or updates a Coolify service for the given app manifest.

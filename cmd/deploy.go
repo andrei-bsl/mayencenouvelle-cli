@@ -8,6 +8,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/authentik"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -23,6 +24,8 @@ var deployCmd = &cobra.Command{
   3. Creates/updates Coolify service with env vars (including OIDC credentials)
   4. Triggers initial deployment in Coolify
   5. Waits for health check to pass
+  6. Registers GitHub webhooks (if webhooks: true) — one per Coolify resource
+     (dev + prod when both environments are deployed)
 
 For non-Coolify apps (systemd-service, etc.) a note is printed if DNS rewrites are needed.
 Wildcard *.apps.mayencenouvelle.internal covers Coolify apps — only custom hostnames
@@ -130,6 +133,54 @@ Examples:
 			return fmt.Errorf("health check failed: %w", err)
 		}
 		ok("Health", "service is healthy")
+
+		// ── 6. GitHub webhooks ──────────────────────────────────────────────────
+		// Register one webhook per Coolify resource for this app.
+		// Multiple resources exist when both dev + prod environments are deployed.
+		// Each resource has its own Coolify token (ManualWebhookSecretGithub) which
+		// serves as both the URL token and the HMAC signing secret for GitHub.
+		if app.Spec.Capabilities.Webhooks {
+			githubToken := viper.GetString("GITHUB_TOKEN")
+			if githubToken == "" {
+				fmt.Printf("  %s [Webhooks] GITHUB_TOKEN not set — skipping webhook registration\n",
+					color.YellowString("⚠"))
+			} else {
+				step("Webhooks", "Reconciling GitHub webhooks")
+				ghClient := github.NewClient(githubToken)
+				repo := github.RepoSlug(app.Spec.Repository.URL)
+
+				// GetAppsByName returns ALL Coolify resources with this name
+				// (typically 2: development-internal + production-internal)
+				allResources, err := coolifyClient.GetAppsByName(ctx, appName)
+				if err != nil {
+					fmt.Printf("  %s [Webhooks] could not list Coolify resources: %v\n",
+						color.YellowString("⚠"), err)
+				} else {
+					for i := range allResources {
+						resource := &allResources[i]
+						// Ensure the resource has a webhook token — generate + PATCH one if missing.
+						if _, err := coolifyClient.EnsureWebhookToken(ctx, resource); err != nil {
+							fmt.Printf("  %s [Webhooks] could not provision token for %s: %v\n",
+								color.YellowString("⚠"), resource.UUID, err)
+							continue
+						}
+						wURL := coolifyClient.WebhookURL(resource.ManualWebhookSecretGithub)
+						_, created, err := ghClient.EnsureWebhook(ctx, repo, wURL, resource.ManualWebhookSecretGithub)
+						if err != nil {
+							fmt.Printf("  %s [Webhooks] branch=%s: %v\n",
+								color.YellowString("⚠"), resource.Branch, err)
+							continue
+						}
+						action := "updated"
+						if created {
+							action = "created"
+						}
+						ok("Webhooks", fmt.Sprintf("%s (branch: %s, uuid: %s)",
+							action, resource.Branch, resource.UUID))
+					}
+				}
+			}
+		}
 
 		// ── Done ────────────────────────────────────────────────────────────────
 		domains := app.GetDomains()

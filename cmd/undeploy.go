@@ -8,6 +8,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/authentik"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -64,6 +65,19 @@ Examples:
 		}
 
 		if deleteApp {
+			// Collect webhook URLs from ALL Coolify resources BEFORE deleting,
+			// so we can clean up GitHub webhooks after the Coolify resource is gone.
+			var webhookURLs []string
+			if app.Spec.Capabilities.Webhooks {
+				if allResources, err := coolifyClient.GetAppsByName(ctx, appName); err == nil {
+					for _, r := range allResources {
+						if r.ManualWebhookSecretGithub != "" {
+							webhookURLs = append(webhookURLs, coolifyClient.WebhookURL(r.ManualWebhookSecretGithub))
+						}
+					}
+				}
+			}
+
 			fmt.Printf("%s This will %s %s from Coolify (uuid: %s).\n",
 				color.YellowString("⚠"),
 				color.New(color.Bold, color.FgRed).Sprint("permanently delete"),
@@ -73,6 +87,10 @@ Examples:
 			if app.Spec.Capabilities.Auth == "oidc" {
 				fmt.Printf("  Authentik OAuth2 provider (%s) and application (%s) will also be removed.\n",
 					app.ProviderName(), app.AppSlug())
+			}
+			if len(webhookURLs) > 0 {
+				fmt.Printf("  %d GitHub webhook(s) will also be removed from %s.\n",
+					len(webhookURLs), github.RepoSlug(app.Spec.Repository.URL))
 			}
 			fmt.Printf("  Press Ctrl+C within 5s to abort...")
 			time.Sleep(5 * time.Second)
@@ -95,6 +113,27 @@ Examples:
 				return fmt.Errorf("coolify delete: %w", err)
 			}
 			ok("Coolify", fmt.Sprintf("%s deleted from Coolify", appName))
+
+			// Remove GitHub webhooks (after Coolify delete — order doesn't matter for GitHub)
+			if len(webhookURLs) > 0 {
+				githubToken := viper.GetString("GITHUB_TOKEN")
+				if githubToken != "" {
+					step("Webhooks", "Removing GitHub webhooks")
+					ghClient := github.NewClient(githubToken)
+					repoSlug := github.RepoSlug(app.Spec.Repository.URL)
+					for _, wURL := range webhookURLs {
+						if err := ghClient.DeleteWebhookByURL(ctx, repoSlug, wURL); err != nil {
+							fmt.Printf("  %s [Webhooks] delete skipped: %v\n", color.YellowString("⚠"), err)
+						} else {
+							ok("Webhooks", fmt.Sprintf("removed %s", wURL))
+						}
+					}
+				} else {
+					fmt.Printf("  %s [Webhooks] GITHUB_TOKEN not set — webhooks not removed from GitHub\n",
+						color.YellowString("⚠"))
+				}
+			}
+
 			fmt.Printf("\n%s %s deleted. Run 'mn-cli deploy %s' to redeploy from scratch.\n",
 				color.GreenString("✓"), color.New(color.Bold).Sprint(appName), appName)
 			return nil
