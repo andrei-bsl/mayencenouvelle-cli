@@ -9,24 +9,24 @@ import (
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/authentik"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
-	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/traefik"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy <app-name>",
-	Short: "Deploy a single app end-to-end (Coolify + Authentik + Traefik + DNS + webhook)",
+	Short: "Deploy a single app end-to-end (Coolify + Authentik + DNS + webhook)",
 	Long: `Reads the app manifest and applies all required configuration:
 
   1. Validates the manifest
   2. Creates/updates Authentik OAuth2 provider + application (if auth: oidc)
   3. Creates/updates Coolify service with env vars (including OIDC credentials)
-  4. Generates Traefik router config (internal and/or external)
-  5. Creates/updates DNS rewrite in AdGuard Home
-  6. Configures GitHub webhook for auto-deploy on push
-  7. Triggers initial deployment in Coolify
-  8. Waits for health check to pass
+  4. Triggers initial deployment in Coolify
+  5. Waits for health check to pass
+
+  Note: domain routing (FQDN) must be set manually in Coolify UI after first deploy.
+  Coolify API does not allow setting fqdn via API — routing is handled by Coolify's
+  internal Traefik proxy using the wildcard *.apps.mayencenouvelle.internal rule.
 
 All operations are idempotent — safe to run multiple times.
 
@@ -107,21 +107,13 @@ Examples:
 		}
 		ok("Coolify", fmt.Sprintf("service %s ready (uuid: %s)", svc.Name, appID))
 
-		// ── 4. Traefik routes ─────────────────────────────────────────────────
-		step("Traefik", "Generating router configuration")
-		traefikClient := traefik.NewClient(viper.GetString("TRAEFIK_CONFIG_DIR"))
-		if err := traefikClient.ApplyRoutes(app); err != nil {
-			return fmt.Errorf("traefik: %w", err)
-		}
-		ok("Traefik", "routes written to config dir")
-
-		// ── 5. Trigger Coolify deploy ─────────────────────────────────────────
+		// ── 4. Trigger Coolify deploy ─────────────────────────────────────────
 		step("Coolify", "Triggering deployment")
 		if err := coolifyClient.Deploy(ctx, appID); err != nil {
 			return fmt.Errorf("coolify deploy: %w", err)
 		}
 
-		// ── 6. Wait for healthy ────────────────────────────────────────────────
+		// ── 5. Wait for healthy ────────────────────────────────────────────────
 		step("Health", fmt.Sprintf("Waiting for %s to become healthy", app.Spec.Domains.Internal))
 		if err := coolifyClient.WaitForHealthy(ctx, appID, 2*time.Minute); err != nil {
 			return fmt.Errorf("health check failed: %w", err)
