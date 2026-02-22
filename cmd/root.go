@@ -71,6 +71,7 @@ func init() {
 	rootCmd.AddCommand(planCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(applyCmd)
+	rootCmd.AddCommand(undeployCmd)
 	rootCmd.AddCommand(rotateCmd)
 	rootCmd.AddCommand(rollbackCmd)
 }

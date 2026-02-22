@@ -168,6 +168,24 @@ func (c *Client) RollbackToDeployment(ctx context.Context, serviceID, deployment
 	return nil
 }
 
+// Stop stops (but does not delete) a running Coolify application.
+// The app config and git settings are preserved — it can be restarted from Coolify UI or CLI.
+func (c *Client) Stop(ctx context.Context, serviceUUID string) error {
+	if err := c.http.Post(ctx, "/api/v1/applications/"+serviceUUID+"/stop", nil, nil); err != nil {
+		return fmt.Errorf("stop application: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes a Coolify application and all its data.
+// This is irreversible — the app must be recreated from scratch via 'deploy'.
+func (c *Client) Delete(ctx context.Context, serviceUUID string) error {
+	if err := c.http.Delete(ctx, "/api/v1/applications/"+serviceUUID); err != nil {
+		return fmt.Errorf("delete application: %w", err)
+	}
+	return nil
+}
+
 // WaitForHealthy polls the service status until it is running or timeout.
 // Coolify returns statuses like "running", "running:healthy", "running:unhealthy".
 func (c *Client) WaitForHealthy(ctx context.Context, serviceID string, timeout time.Duration) error {
