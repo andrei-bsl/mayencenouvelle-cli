@@ -97,27 +97,36 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 		// Response format: {"uuid": "...", "domains": "..."}
 		payload := buildCoolifyCreatePayload(app, base)
 		var resp struct {
-			UUID    string `json:"uuid"`
-			Domains string `json:"domains"`
+			UUID string `json:"uuid"`
 		}
 		if err := c.http.Post(ctx, "/api/v1/applications/public", payload, &resp); err != nil {
 			return nil, fmt.Errorf("create application: %w", err)
 		}
 
-		// Note: fqdn cannot be set via the Coolify API (neither in the create payload
-		// nor via PATCH). Domain routing is handled by Traefik config instead.
-		// The auto-generated sslip.io domain in Coolify is for direct access only.
-		return &App{UUID: resp.UUID, Name: app.Metadata.Name}, nil
+		// Set the domain immediately after creation via PATCH.
+		// The create endpoint ignores the domains field; a separate PATCH is required.
+		// Use http:// prefix — https:// causes Coolify to add a redirect-to-https +
+		// letsencrypt router which breaks our central-Traefik→coolify-proxy:80 architecture.
+		// Traefik labels are regenerated on the subsequent deploy trigger.
+		domains := buildFQDN(app)
+		domainPayload := map[string]interface{}{"domains": domains}
+		if err := c.http.Patch(ctx, "/api/v1/applications/"+resp.UUID, domainPayload, nil); err != nil {
+			return nil, fmt.Errorf("set domain after create: %w", err)
+		}
+
+		return &App{UUID: resp.UUID, Name: app.Metadata.Name, FQDN: domains}, nil
 	}
 
-	// Update existing service - immutable fields (project_uuid, environment_name, etc.) excluded.
-	// Note: fqdn cannot be set via the Coolify API - domain routing is handled by Traefik.
-	// The PATCH response body does not include fqdn, so we return the pre-fetched existing
-	// record which was populated from the list endpoint (includes fqdn, status, etc.).
-	payload := buildCoolifyUpdatePayload(app)
+	// Update existing service.
+	// Includes domains so the FQDN stays in sync with the manifest on every deploy.
+	// The PATCH response body is empty; return the pre-fetched existing record with
+	// updated FQDN so downstream code (e.g. mismatch checks) sees the correct value.
+	domains := buildFQDN(app)
+	payload := buildCoolifyUpdatePayload(app, domains)
 	if err := c.http.Patch(ctx, "/api/v1/applications/"+existing.UUID, payload, nil); err != nil {
 		return nil, fmt.Errorf("update application: %w", err)
 	}
+	existing.FQDN = domains
 	return existing, nil
 }
 
@@ -254,8 +263,8 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 
 		// Optional fields
 		"dockerfile_location": app.Spec.Build.Dockerfile,
-		// Note: fqdn is NOT included here - Coolify silently ignores it on create.
-		// It is set via a separate PATCH call after creation (see EnsureApp).
+			// domains is NOT set here - Coolify ignores it on the create endpoint.
+		// It is set immediately after via a separate PATCH call (see EnsureApp).
 	}
 }
 
@@ -277,8 +286,11 @@ func mapEnvironment(branch, exposure string) string {
 }
 
 // buildCoolifyUpdatePayload builds payload for PATCH /api/v1/applications/{uuid}
-// Note: project_uuid, environment_name, server_uuid, destination_uuid are immutable
-func buildCoolifyUpdatePayload(app *manifest.AppConfig) map[string]interface{} {
+// Note: project_uuid, environment_name, server_uuid, destination_uuid are immutable.
+// domains must be passed as a pre-built string (from buildFQDN) with http:// prefix
+// for internal apps — https:// causes Coolify to generate a redirect+letsencrypt router
+// which breaks our central-Traefik→coolify-proxy:80 forwarding architecture.
+func buildCoolifyUpdatePayload(app *manifest.AppConfig, domains string) map[string]interface{} {
 	// Determine build pack: dockerfile if specified, otherwise nixpacks
 	buildPack := "nixpacks"
 	if app.Spec.Build.Dockerfile != "" || app.Spec.Build.BaseImage != "" {
@@ -291,6 +303,7 @@ func buildCoolifyUpdatePayload(app *manifest.AppConfig) map[string]interface{} {
 		"build_pack":          buildPack,
 		"ports_exposes":       fmt.Sprintf("%d", app.Spec.Runtime.Port),
 		"dockerfile_location": app.Spec.Build.Dockerfile,
+		"domains":             domains,
 	}
 }
 

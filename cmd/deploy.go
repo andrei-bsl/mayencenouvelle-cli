@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -133,23 +132,10 @@ Examples:
 			fmt.Printf("  External: https://%s\n", domains.External)
 		}
 
-		// Warn if the FQDN in Coolify doesn't include the expected domain (first deploy only).
-		// Coolify may store the FQDN with http:// even when https:// is used — normalise
-		// by stripping the scheme and checking only the host portion.
-		stripScheme := func(u string) string {
-			u = strings.TrimPrefix(u, "https://")
-			u = strings.TrimPrefix(u, "http://")
-			return u
-		}
-		fqdnHosts := stripScheme(svc.FQDN) // may be comma-separated for multi-domain apps
-		expectedHost := domains.Internal
-		fqdnSet := expectedHost != "" && strings.Contains(fqdnHosts, expectedHost)
-		if !fqdnSet {
-			fmt.Printf("\n%s Manual step required (first deploy only):\n", color.YellowString("⚠"))
-			fmt.Printf("  Set the domain in Coolify UI → %s → Settings → Domains:\n", appName)
-			fmt.Printf("  %s\n", color.CyanString("https://"+domains.Internal))
-			fmt.Printf("  Coolify UI: %s\n", coolifyURL)
-		}
+		// Domain is now set automatically via the domains field in the PATCH call
+		// (using http:// prefix so Coolify generates plain HTTP Traefik labels that work
+		// with our central-Traefik→coolify-proxy:80 forwarding architecture).
+		_ = coolifyURL // retained for future use
 		return nil
 	},
 }
