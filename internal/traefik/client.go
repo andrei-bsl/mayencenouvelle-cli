@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
@@ -124,20 +125,35 @@ func (c *Client) PlanRoutes(app *manifest.AppConfig) ([]PlanAction, error) {
 		actions = append(actions, PlanAction{
 			Operation: op,
 			Resource:  "Traefik Router (internal)",
-			Detail:    fmt.Sprintf("Host(`%s`)", domains.Internal),
+			Detail:    buildHostRule(domains.Internal),
 		})
 	}
 	if domains.External != "" {
 		actions = append(actions, PlanAction{
 			Operation: op,
 			Resource:  "Traefik Router (external)",
-			Detail:    fmt.Sprintf("Host(`%s`) + Let's Encrypt TLS", domains.External),
+			Detail:    buildHostRule(domains.External) + " + Let's Encrypt TLS",
 		})
 	}
 	return actions, nil
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+// buildHostRule converts a comma-separated list of hostnames into a valid
+// Traefik Host() rule. Single hostname: Host(`a.example.com`).
+// Multiple hostnames: Host(`a.example.com`) || Host(`b.example.com`).
+func buildHostRule(domains string) string {
+	parts := strings.Split(domains, ",")
+	rules := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			rules = append(rules, fmt.Sprintf("Host(`%s`)", p))
+		}
+	}
+	return strings.Join(rules, " || ")
+}
 
 func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 	routers := make(map[string]router)
@@ -171,7 +187,7 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 		}
 
 		r := router{
-			Rule:        fmt.Sprintf("Host(`%s`)", domains.Internal),
+			Rule:        buildHostRule(domains.Internal),
 			Service:     svcName,
 			Entrypoints: []string{"websecure"},
 			Middlewares: middlewares,
@@ -187,7 +203,7 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 		(app.Spec.Capabilities.Exposure == "external" || app.Spec.Capabilities.Exposure == "both") {
 
 		routers[app.Metadata.Name+"-external"] = router{
-			Rule:        fmt.Sprintf("Host(`%s`)", domains.External),
+			Rule:        buildHostRule(domains.External),
 			Service:     svcName,
 			Entrypoints: []string{"websecure"},
 			Middlewares: middlewares,

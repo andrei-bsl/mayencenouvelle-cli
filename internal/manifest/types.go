@@ -310,25 +310,37 @@ func (a *AppConfig) GetDomains() Domains {
 	isDevelopment := stage == "development" || stage == "development-internal"
 	if isDevelopment {
 		if domains.Internal != "" {
-			domains.Internal = prefixDomain(domains.Internal, "dev-")
+			domains.Internal = prefixDomains(domains.Internal, "dev-")
 		}
 		if domains.External != "" {
-			domains.External = prefixDomain(domains.External, "dev-")
+			domains.External = prefixDomains(domains.External, "dev-")
 		}
 	}
 
 	return domains
 }
 
-// prefixDomain adds a prefix to a domain name (before the first dot).
-// Example: prefixDomain("hello.apps.mayencenouvelle.internal", "dev-") -> "dev-hello.apps.mayencenouvelle.internal"
+// prefixDomains adds a prefix to each domain in a comma-separated list.
+// Each domain receives the prefix before its first label (before the first dot).
+// Example: prefixDomains("a.example.internal,b.example.com", "dev-")
+//   → "dev-a.example.internal,dev-b.example.com"
+func prefixDomains(domains, prefix string) string {
+	parts := strings.Split(domains, ",")
+	for i, p := range parts {
+		parts[i] = prefixDomain(strings.TrimSpace(p), prefix)
+	}
+	return strings.Join(parts, ",")
+}
+
+// prefixDomain adds a prefix to a single domain name (before the first dot).
+// Example: prefixDomain("hello.apps.mayencenouvelle.internal", "dev-")
+//
+//	→ "dev-hello.apps.mayencenouvelle.internal"
 func prefixDomain(domain, prefix string) string {
-	// Find the first dot
 	for i, ch := range domain {
 		if ch == '.' {
 			return prefix + domain[:i] + domain[i:]
 		}
 	}
-	// No dot found, just prefix the whole thing
 	return prefix + domain
 }

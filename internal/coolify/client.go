@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/common"
@@ -462,22 +463,26 @@ func buildFQDN(app *manifest.AppConfig) string {
 	}
 
 	// ── Internal-only apps ──────────────────────────────────────────────────────
-	// Coolify fqdn string for internal apps: two comma-separated http:// entries.
-	// First: the *.mayencenouvelle.internal domain (Traefik wildcard route).
-	// Second: the alt *.internal.apps.mayencenouvelle.com domain (Authentik redirect
-	// URIs and users outside the VPN who hit the public DNS alias).
-	// The alt domain comes from Domains.External in the manifest if explicitly set,
-	// otherwise it is derived from the app name (legacy / default behaviour).
+	// domains.internal is a comma-separated list of hostnames — all served via
+	// http:// in Coolify (central Traefik handles TLS termination).
+	// Typical pattern: "app.apps.mayencenouvelle.internal,app.internal.apps.mayencenouvelle.com"
+	// The second entry (alt public domain) is used by Authentik redirect URIs and
+	// split-DNS users who reach the app via the public DNS alias.
+	// The list is declared entirely in the manifest — no values are derived here.
 	if isInternal {
-		internalDomain := app.Spec.Domains.Internal
-		if internalDomain == "" {
-			internalDomain = fmt.Sprintf("%s.apps.mayencenouvelle.internal", name)
+		rawInternal := app.Spec.Domains.Internal
+		if rawInternal == "" {
+			rawInternal = fmt.Sprintf("%s.apps.mayencenouvelle.internal", name)
 		}
-		altDomain := app.Spec.Domains.External
-		if altDomain == "" {
-			altDomain = fmt.Sprintf("%s.internal.apps.mayencenouvelle.com", name)
+		parts := strings.Split(rawInternal, ",")
+		var entries []string
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				entries = append(entries, fmt.Sprintf("http://%s%s", envPrefix, p))
+			}
 		}
-		return fmt.Sprintf("http://%s%s,http://%s%s", envPrefix, internalDomain, envPrefix, altDomain)
+		return strings.Join(entries, ",")
 	}
 
 	// ── External (public) domain ─────────────────────────────────────────────────
