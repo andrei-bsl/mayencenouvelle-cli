@@ -451,7 +451,9 @@ func buildCoolifyUpdatePayload(app *manifest.AppConfig, domains string) map[stri
 func buildFQDN(app *manifest.AppConfig) string {
 	name := app.Metadata.Name
 	isProduction := app.Spec.Repository.Branch == "main" || app.Spec.Repository.Branch == "master"
-	isInternal := app.Spec.Capabilities.Exposure == "internal"
+	exposure := app.Spec.Capabilities.Exposure
+	isInternal := exposure == "internal"
+	isBoth := exposure == "both"
 
 	// Determine environment prefix
 	envPrefix := ""
@@ -459,31 +461,39 @@ func buildFQDN(app *manifest.AppConfig) string {
 		envPrefix = "dev-"
 	}
 
-	// Use explicit domain from manifest if provided, with env prefix
-	if isInternal && app.Spec.Domains.Internal != "" {
-		domain := app.Spec.Domains.Internal
-		// Prepend env prefix if not production
-		if envPrefix != "" {
-			domain = envPrefix + domain
-		}
-		// For internal apps, also add the alternate domain
-		// Extract just the app name part and construct alternate domain
-		altDomain := fmt.Sprintf("%s%s.internal.apps.mayencenouvelle.com", envPrefix, name)
-		return fmt.Sprintf("http://%s,http://%s", domain, altDomain)
-	}
-
-	if !isInternal && app.Spec.Domains.External != "" {
-		domain := app.Spec.Domains.External
-		if envPrefix != "" {
-			domain = envPrefix + domain
-		}
-		return fmt.Sprintf("https://%s", domain)
-	}
-
-	// Generate default domain based on exposure
+	// ── Internal-only apps ──────────────────────────────────────────────────────
+	// Coolify fqdn string for internal apps: two comma-separated http:// entries.
+	// First: the *.mayencenouvelle.internal domain (Traefik wildcard route).
+	// Second: the alt *.internal.apps.mayencenouvelle.com domain (Authentik redirect
+	// URIs and users outside the VPN who hit the public DNS alias).
+	// The alt domain comes from Domains.External in the manifest if explicitly set,
+	// otherwise it is derived from the app name (legacy / default behaviour).
 	if isInternal {
-		return fmt.Sprintf("http://%s%s.apps.mayencenouvelle.internal,http://%s%s.internal.apps.mayencenouvelle.com",
-			envPrefix, name, envPrefix, name)
+		internalDomain := app.Spec.Domains.Internal
+		if internalDomain == "" {
+			internalDomain = fmt.Sprintf("%s.apps.mayencenouvelle.internal", name)
+		}
+		altDomain := app.Spec.Domains.External
+		if altDomain == "" {
+			altDomain = fmt.Sprintf("%s.internal.apps.mayencenouvelle.com", name)
+		}
+		return fmt.Sprintf("http://%s%s,http://%s%s", envPrefix, internalDomain, envPrefix, altDomain)
 	}
-	return fmt.Sprintf("https://%s%s.apps.mayencenouvelle.com", envPrefix, name)
+
+	// ── External (public) domain ─────────────────────────────────────────────────
+	externalDomain := app.Spec.Domains.External
+	if externalDomain == "" {
+		externalDomain = fmt.Sprintf("%s.apps.mayencenouvelle.com", name)
+	}
+	externalFQDN := fmt.Sprintf("https://%s%s", envPrefix, externalDomain)
+
+	// ── Both-zone apps: also include the internal domain ─────────────────────────
+	// Use http:// for the internal entry so Coolify→Traefik forwarding works
+	// (same convention as pure internal apps).
+	if isBoth && app.Spec.Domains.Internal != "" {
+		internalFQDN := fmt.Sprintf("http://%s%s", envPrefix, app.Spec.Domains.Internal)
+		return fmt.Sprintf("%s,%s", externalFQDN, internalFQDN)
+	}
+
+	return externalFQDN
 }
