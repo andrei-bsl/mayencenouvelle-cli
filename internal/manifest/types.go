@@ -152,14 +152,19 @@ type Env map[string]string
 type Auth struct {
 	// ClientType is the OAuth2 client type: "public" (PKCE, for SPAs) or
 	// "confidential" (client secret, for server-side apps). Default: "public".
-	ClientType     string   `yaml:"client_type"`
-	Scopes         []string `yaml:"scopes"`
-	RedirectPaths  []string `yaml:"redirect_paths"`
-	LogoutURL      string   `yaml:"logout_url"`
-	AllowedGroups  []string `yaml:"allowed_groups"`
+	ClientType    string   `yaml:"client_type"`
+	Scopes        []string `yaml:"scopes"`
+	RedirectPaths []string `yaml:"redirect_paths"`
+	LogoutURL     string   `yaml:"logout_url"`
+	AllowedGroups []string `yaml:"allowed_groups"`
+	// LibraryGroup overrides the Authentik application library group shown on the
+	// user dashboard. Defaults to "Internal" for exposure=internal and "Apps" for
+	// exposure=external|both. Use this when the auto-derived group doesn't match
+	// — e.g. an external test app that should appear under "Test" instead of "Apps".
+	LibraryGroup  string   `yaml:"library_group,omitempty"`
 	// LocalhostPorts lists local dev server ports to include as redirect URI
 	// origins (http://localhost:{port}{redirect_path}). Useful for local dev.
-	LocalhostPorts []int    `yaml:"localhost_ports"`
+	LocalhostPorts []int   `yaml:"localhost_ports"`
 	// RedirectURIs is an optional explicit list of full redirect URIs.
 	// When set, these are sent to Authentik verbatim (all strict matching) and
 	// the auto-derivation from domains + redirect_paths is skipped entirely.
@@ -168,7 +173,7 @@ type Auth struct {
 	//   redirect_uris:
 	//     - https://hello-world.apps.mayencenouvelle.internal/auth/callback
 	//     - https://custom.example.com/callback
-	RedirectURIs   []string `yaml:"redirect_uris"`
+	RedirectURIs  []string `yaml:"redirect_uris"`
 }
 
 // TraefikSpec holds app-specific Traefik overrides.
@@ -204,11 +209,16 @@ func (a *AppConfig) AppDisplayName() string {
 
 // AuthentikGroup returns the Authentik application library group for this app.
 // This determines how the app appears in the Authentik user dashboard.
-// Follows the workspace categorisation:
 //
-//	"internal" exposure → "Internal" (admin and ops tools)
-//	"external" / "both" → "Apps" (end-user facing)
+// Resolution order:
+//  1. authentication.library_group in the manifest (explicit override)
+//  2. Derived from capabilities.exposure:
+//     "internal" → "Internal" (admin and ops tools)
+//     "external" / "both" → "Apps" (end-user facing)
 func (a *AppConfig) AuthentikGroup() string {
+	if a.Spec.Auth.LibraryGroup != "" {
+		return a.Spec.Auth.LibraryGroup
+	}
 	switch a.Spec.Capabilities.Exposure {
 	case "external", "both":
 		return "Apps"
