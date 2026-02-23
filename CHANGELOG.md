@@ -8,6 +8,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased] — develop branch
 
 ### Added
+- Private repository support: `EnsureApp` now routes to `POST /api/v1/applications/private-deploy-key`
+  when `private_key_uuid` is set (app-level or base), instead of always using `/applications/public`.
+  The `/public` endpoint silently ignores `private_key_uuid`, leaving `private_key_id: None` and
+  causing SSH authentication failures at clone time.
+  - `httpsToSSH()` converts repository HTTPS URLs to SSH format (`git@github.com:...`) automatically
+  - `private_key_uuid` can be set per-app (`repository.private_key_uuid` in manifest) or globally
+    in `base.yaml` (`coolify.private_key_uuid`)
+  - GitHub deploy keys must be unique per repository; use per-app keys for multiple private repos
 - `undeploy` command: stops a running app via Coolify API (`POST /applications/{uuid}/stop`)
   - Preserves app config, env vars, and git settings in Coolify
   - `--delete` flag: permanently removes the app with a 5s abort window

@@ -27,12 +27,16 @@ type BaseConfig struct {
 
 // CoolifyBase holds Coolify platform configuration.
 type CoolifyBase struct {
-	Project        string `yaml:"project"`
-	ProjectUUID    string `yaml:"project_uuid"`
-	Environment    string `yaml:"environment"`
-	Endpoint       string `yaml:"endpoint"`
-	ServerUUID     string `yaml:"server_uuid"`
+	Project         string `yaml:"project"`
+	ProjectUUID     string `yaml:"project_uuid"`
+	Environment     string `yaml:"environment"`
+	Endpoint        string `yaml:"endpoint"`
+	ServerUUID      string `yaml:"server_uuid"`
 	DestinationUUID string `yaml:"destination_uuid"`
+	// PrivateKeyUUID is the Coolify SSH deploy key UUID (from Keys & Certificates).
+	// Used when creating applications from private GitHub repositories.
+	// Corresponds to the 'github-deploy' key registered in Coolify.
+	PrivateKeyUUID  string `yaml:"private_key_uuid"`
 }
 
 // AuthentikBase holds Authentik platform configuration.
@@ -108,8 +112,13 @@ type Capabilities struct {
 
 // Repository holds source code location.
 type Repository struct {
-	URL    string `yaml:"url"`
-	Branch string `yaml:"branch"`
+	URL            string `yaml:"url"`
+	Branch         string `yaml:"branch"`
+	// PrivateKeyUUID overrides the global Coolify deploy key for this app.
+	// Required for private repos when the global key is already used elsewhere
+	// (GitHub deploy keys must be unique per repository).
+	// Find UUIDs in Coolify → Keys & Certificates, or via mn-cli.
+	PrivateKeyUUID string `yaml:"private_key_uuid,omitempty"`
 }
 
 // Build holds Coolify build parameters.

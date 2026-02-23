@@ -2,6 +2,8 @@
 dist/
 mayence
 mayence.exe
+mn-cli
+mn-cli.exe
 
 # IDE
 .idea/

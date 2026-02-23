@@ -171,13 +171,25 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 	}
 
 	if existing == nil {
-		// Create new service via /api/v1/applications/public endpoint
+		// Create new service. Endpoint depends on whether a deploy key is configured:
+		//   - Private repos → /api/v1/applications/private-deploy-key (requires private_key_uuid)
+		//   - Public repos  → /api/v1/applications/public
+		// The /public endpoint silently ignores private_key_uuid and private_key_id stays
+		// None, causing SSH auth failure at clone time.
 		// Response format: {"uuid": "...", "domains": "..."}
 		payload := buildCoolifyCreatePayload(app, base)
+		privateKeyUUID := app.Spec.Repository.PrivateKeyUUID
+		if privateKeyUUID == "" {
+			privateKeyUUID = base.Coolify.PrivateKeyUUID
+		}
+		createEndpoint := "/api/v1/applications/public"
+		if privateKeyUUID != "" {
+			createEndpoint = "/api/v1/applications/private-deploy-key"
+		}
 		var resp struct {
 			UUID string `json:"uuid"`
 		}
-		if err := c.http.Post(ctx, "/api/v1/applications/public", payload, &resp); err != nil {
+		if err := c.http.Post(ctx, createEndpoint, payload, &resp); err != nil {
 			return nil, fmt.Errorf("create application: %w", err)
 		}
 
@@ -199,6 +211,8 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 	// Includes domains so the FQDN stays in sync with the manifest on every deploy.
 	// The PATCH response body is empty; return the pre-fetched existing record with
 	// updated FQDN so downstream code (e.g. mismatch checks) sees the correct value.
+	// Note: git_repository and private_key_uuid cannot be changed via PATCH —
+	// resources created with an HTTPS URL must be deleted and recreated.
 	domains := buildFQDN(app)
 	payload := buildCoolifyUpdatePayload(app, domains)
 	if err := c.http.Patch(ctx, "/api/v1/applications/"+existing.UUID, payload, nil); err != nil {
@@ -316,7 +330,26 @@ func (c *Client) PlanApp(ctx context.Context, app *manifest.AppConfig, base *man
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-// buildCoolifyCreatePayload builds payload for POST /api/v1/applications/public
+// httpsToSSH converts a GitHub HTTPS URL to its SSH equivalent.
+// Example: https://github.com/owner/repo.git → git@github.com:owner/repo.git
+// Non-GitHub or already-SSH URLs are returned unchanged.
+func httpsToSSH(rawURL string) string {
+	// Already SSH format
+	if len(rawURL) > 4 && rawURL[:4] == "git@" {
+		return rawURL
+	}
+	// https://github.com/owner/repo.git → git@github.com:owner/repo.git
+	const prefix = "https://github.com/"
+	if len(rawURL) > len(prefix) && rawURL[:len(prefix)] == prefix {
+		return "git@github.com:" + rawURL[len(prefix):]
+	}
+	return rawURL
+}
+
+// buildCoolifyCreatePayload builds the JSON payload for creating a Coolify application.
+// Used by both /api/v1/applications/public (public repos) and
+// /api/v1/applications/private-deploy-key (private repos with SSH deploy key).
+// When private_key_uuid is set, the SSH URL is used for git_repository.
 func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfig) map[string]interface{} {
 	// Determine build pack: dockerfile if specified, otherwise nixpacks
 	buildPack := "nixpacks"
@@ -327,23 +360,40 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 	// Get environment name based on branch + exposure (development-internal, development, etc.)
 	envName := app.GetEnvironmentStage()
 
-	return map[string]interface{}{
-		// Required fields for /api/v1/applications/public
-		"project_uuid":     base.Coolify.ProjectUUID,
-		"environment_name": envName,
-		"server_uuid":      base.Coolify.ServerUUID,
-		"destination_uuid": base.Coolify.DestinationUUID,
-		"git_repository":   app.Spec.Repository.URL,
-		"git_branch":       app.Spec.Repository.Branch,
-		"build_pack":       buildPack,
-		"ports_exposes":    fmt.Sprintf("%d", app.Spec.Runtime.Port),
-		"name":             app.Metadata.Name,
+	// Resolve the deploy key: app-level overrides base config (per-repo keys).
+	// GitHub deploy keys must be unique per repo, so each private repo needs its own key.
+	privateKeyUUID := app.Spec.Repository.PrivateKeyUUID
+	if privateKeyUUID == "" {
+		privateKeyUUID = base.Coolify.PrivateKeyUUID
+	}
 
-		// Optional fields
+	// Use SSH URL when a private key is configured; HTTPS for public repos.
+	repoURL := app.Spec.Repository.URL
+	if privateKeyUUID != "" {
+		repoURL = httpsToSSH(repoURL)
+	}
+
+	payload := map[string]interface{}{
+		"project_uuid":        base.Coolify.ProjectUUID,
+		"environment_name":    envName,
+		"server_uuid":         base.Coolify.ServerUUID,
+		"destination_uuid":    base.Coolify.DestinationUUID,
+		"git_repository":      repoURL,
+		"git_branch":          app.Spec.Repository.Branch,
+		"build_pack":          buildPack,
+		"ports_exposes":       fmt.Sprintf("%d", app.Spec.Runtime.Port),
+		"name":                app.Metadata.Name,
 		"dockerfile_location": app.Spec.Build.Dockerfile,
-			// domains is NOT set here - Coolify ignores it on the create endpoint.
+		// domains is NOT set here - Coolify ignores it on the create endpoint.
 		// It is set immediately after via a separate PATCH call (see EnsureApp).
 	}
+
+	// Attach SSH deploy key for private repositories.
+	if privateKeyUUID != "" {
+		payload["private_key_uuid"] = privateKeyUUID
+	}
+
+	return payload
 }
 
 // mapEnvironment maps branch + exposure to Coolify environment name
@@ -368,6 +418,12 @@ func mapEnvironment(branch, exposure string) string {
 // domains must be passed as a pre-built string (from buildFQDN) with http:// prefix
 // for internal apps — https:// causes Coolify to generate a redirect+letsencrypt router
 // which breaks our central-Traefik→coolify-proxy:80 forwarding architecture.
+//
+// git_repository and private_key_uuid are intentionally excluded — Coolify's PATCH
+// endpoint does not accept private_key_uuid, and changing git_repository without
+// re-associating a key would break private repo cloning. Resources created with
+// the wrong URL type (HTTPS instead of SSH) must be deleted and recreated via
+// 'mn-cli undeploy --delete && mn-cli deploy'.
 func buildCoolifyUpdatePayload(app *manifest.AppConfig, domains string) map[string]interface{} {
 	// Determine build pack: dockerfile if specified, otherwise nixpacks
 	buildPack := "nixpacks"
