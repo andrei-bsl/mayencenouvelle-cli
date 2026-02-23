@@ -324,7 +324,7 @@ func (c *Client) PlanApp(ctx context.Context, app *manifest.AppConfig, base *man
 		}, nil
 	}
 	return []PlanAction{
-		{Operation: "update", Resource: "Coolify Application", Detail: fmt.Sprintf("id=%s", existing.ID)},
+		{Operation: "update", Resource: "Coolify Application", Detail: fmt.Sprintf("uuid=%s", existing.UUID)},
 	}, nil
 }
 
