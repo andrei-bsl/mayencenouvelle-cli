@@ -15,6 +15,7 @@ import (
 )
 
 var deleteApp bool
+var undeployStage string
 
 var undeployCmd = &cobra.Command{
 	Use:   "undeploy <app-name>",
@@ -25,12 +26,14 @@ By default, only the container is stopped — the app config, env vars, and
 git settings remain in Coolify so it can be re-deployed at any time.
 
 With --delete, the application is permanently removed from Coolify.
-A subsequent 'deploy' will recreate it from scratch (including the manual
-domain setup step in the Coolify UI).
+Use --stage prod to target the production resource (branch: main).
+Default stage is dev (branch: develop).
 
 Examples:
-  mayence undeploy hello-world            Stop the container (config preserved)
-  mayence undeploy hello-world --delete   Permanently remove from Coolify`,
+  mn-cli undeploy hello-world                       Stop dev container (config preserved)
+  mn-cli undeploy hello-world --stage prod          Stop prod container
+  mn-cli undeploy hello-world --delete              Permanently delete dev resource
+  mn-cli undeploy hello-world --delete --stage prod Permanently delete prod resource`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		appName := args[0]
@@ -48,19 +51,22 @@ Examples:
 			return err
 		}
 
+		// Apply stage: sets branch to "main" for prod, keeps manifest branch for dev.
+		applyStage(app, undeployStage)
+
 		coolifyClient := coolify.NewClient(
 			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 
-		// Resolve UUID by name
-		svc, err := coolifyClient.GetAppByName(ctx, appName)
+		// Resolve UUID by name AND branch to target the correct stage resource.
+		svc, err := coolifyClient.GetAppByNameAndBranch(ctx, appName, app.Spec.Repository.Branch)
 		if err != nil {
 			return fmt.Errorf("coolify: %w", err)
 		}
 		if svc == nil {
-			fmt.Printf("%s %s is not deployed in Coolify (nothing to do)\n",
-				color.YellowString("⚠"), appName)
+			fmt.Printf("%s %s [%s] is not deployed in Coolify (nothing to do)\n",
+				color.YellowString("⚠"), appName, app.Spec.Repository.Branch)
 			return nil
 		}
 
@@ -155,4 +161,5 @@ Examples:
 
 func init() {
 	undeployCmd.Flags().BoolVar(&deleteApp, "delete", false, "Permanently delete the app from Coolify (irreversible)")
+	undeployCmd.Flags().StringVar(&undeployStage, "stage", "dev", "Deployment stage to target: dev or prod (default: dev)")
 }

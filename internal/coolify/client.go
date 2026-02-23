@@ -74,8 +74,9 @@ type PlanAction struct {
 
 // ─── Interface ───────────────────────────────────────────────────────────────
 
-// GetAppByName retrieves a Coolify service by its name.
+// GetAppByName retrieves the first Coolify service matching the name.
 // Returns nil, nil if no service with that name exists.
+// Use GetAppByNameAndBranch when both dev and prod resources coexist.
 func (c *Client) GetAppByName(ctx context.Context, name string) (*App, error) {
 	apps, err := c.GetAppsByName(ctx, name)
 	if err != nil {
@@ -85,6 +86,22 @@ func (c *Client) GetAppByName(ctx context.Context, name string) (*App, error) {
 		return nil, nil
 	}
 	return &apps[0], nil
+}
+
+// GetAppByNameAndBranch retrieves the Coolify service matching both name and git branch.
+// Used to disambiguate dev (develop) from prod (main) Coolify resources.
+// Returns nil, nil if no matching resource exists.
+func (c *Client) GetAppByNameAndBranch(ctx context.Context, name, branch string) (*App, error) {
+	apps, err := c.GetAppsByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	for i := range apps {
+		if apps[i].Branch == branch {
+			return &apps[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // GetAppsByName returns ALL Coolify application resources with the given name
@@ -146,8 +163,9 @@ func (c *Client) WebhookURL(token string) string {
 // EnsureApp creates or updates a Coolify service for the given app manifest.
 // Idempotent: if the service already exists with the same config, no update is made.
 // Requires base config for Coolify UUIDs (project, server, destination).
+// Branch-aware: uses name+branch to distinguish dev (develop) from prod (main) resources.
 func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *manifest.BaseConfig) (*App, error) {
-	existing, err := c.GetAppByName(ctx, app.Metadata.Name)
+	existing, err := c.GetAppByNameAndBranch(ctx, app.Metadata.Name, app.Spec.Repository.Branch)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +297,7 @@ func (c *Client) WaitForHealthy(ctx context.Context, serviceID string, timeout t
 
 // PlanApp returns a dry-run preview of what EnsureApp would change.
 func (c *Client) PlanApp(ctx context.Context, app *manifest.AppConfig, base *manifest.BaseConfig) ([]PlanAction, error) {
-	existing, err := c.GetAppByName(ctx, app.Metadata.Name)
+	existing, err := c.GetAppByNameAndBranch(ctx, app.Metadata.Name, app.Spec.Repository.Branch)
 	if err != nil {
 		return nil, err
 	}

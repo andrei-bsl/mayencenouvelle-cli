@@ -14,6 +14,22 @@ import (
 	"github.com/spf13/viper"
 )
 
+var deployStage string
+
+// stageToProductionBranch returns true if the stage flag targets production.
+func isProductionStage(stage string) bool {
+	return stage == "prod" || stage == "production"
+}
+
+// applyStage overrides the manifest branch for the target stage:
+//   - dev (default): use manifest branch as-is (e.g. develop)
+//   - prod: override to "main" — Coolify production resource tracks the main branch
+func applyStage(app *manifest.AppConfig, stage string) {
+	if isProductionStage(stage) {
+		app.Spec.Repository.Branch = "main"
+	}
+}
+
 var deployCmd = &cobra.Command{
 	Use:   "deploy <app-name>",
 	Short: "Deploy a single app end-to-end (Coolify + Authentik + DNS + webhook)",
@@ -27,15 +43,13 @@ var deployCmd = &cobra.Command{
   6. Registers GitHub webhooks (if webhooks: true) — one per Coolify resource
      (dev + prod when both environments are deployed)
 
-For non-Coolify apps (systemd-service, etc.) a note is printed if DNS rewrites are needed.
-Wildcard *.apps.mayencenouvelle.internal covers Coolify apps — only custom hostnames
-need a manual AdGuard DNS rewrite.
-
-All operations are idempotent — safe to run multiple times.
+Use --stage prod to deploy the production environment (branch: main).
+Default is dev (branch from manifest, e.g. develop).
 
 Examples:
-  mayence deploy nas-app
-  mayence deploy nas-app --dry-run    Preview without applying`,
+  mn-cli deploy hello-world
+  mn-cli deploy hello-world --stage prod
+  mn-cli deploy hello-world --dry-run`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		appName := args[0]
@@ -63,13 +77,22 @@ Examples:
 			return fmt.Errorf("manifest validation failed")
 		}
 
+		// Apply stage: overrides branch to "main" for prod, no-op for dev.
+		applyStage(app, deployStage)
+		stageLabel := deployStage
+		if isProductionStage(deployStage) {
+			stageLabel = "production"
+		} else {
+			stageLabel = "development"
+		}
+
 		if dryRun {
 			fmt.Printf("%s dry-run mode: use 'mayence plan %s' for detailed preview\n",
 				color.YellowString("⚠"), appName)
 			return nil
 		}
 
-		fmt.Printf("%s deploying %s...\n\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName))
+		fmt.Printf("%s deploying %s [%s]...\n\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName), stageLabel)
 
 		// ── 2. Authentik OAuth2 (only for oidc apps) ─────────────────────────
 		var clientID, clientSecret string
@@ -241,6 +264,10 @@ Examples:
 		}
 		return nil
 	},
+}
+
+func init() {
+	deployCmd.Flags().StringVar(&deployStage, "stage", "dev", "Deployment stage: dev or prod (default: dev)")
 }
 
 // runDeploy is a helper to deploy a named app (reuses deployCmd logic).
