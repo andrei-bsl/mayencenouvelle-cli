@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -89,8 +92,61 @@ func initConfig() {
 
 	viper.AutomaticEnv() // Read from environment variables
 
+	// Load .env file from the lab repo root (two levels above manifests dir).
+	// Keys from .env are set in Viper only if not already set by a real
+	// environment variable, so explicit exports always win.
+	loadDotEnv(manifestsDir)
+
 	if err := viper.ReadInConfig(); err == nil && verbose {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+	}
+}
+
+// loadDotEnv reads KEY=VALUE pairs from the .env file in the lab repo root
+// and sets them in Viper as defaults (real env vars take precedence).
+// It searches: CWD/.env, then manifestsDir/../../.env (typical layout:
+// repo-root/.env with manifests at workspace/manifests/).
+func loadDotEnv(manifestsBase string) {
+	candidates := []string{".env"}
+	if manifestsBase != "" {
+		candidates = append(candidates, filepath.Join(manifestsBase, "..", "..", ".env"))
+	}
+	for _, path := range candidates {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		f, err := os.Open(abs)
+		if err != nil {
+			continue
+		}
+		defer f.Close()
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			k, v, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			k = strings.TrimSpace(k)
+			v = strings.TrimSpace(v)
+			// Strip optional quotes
+			if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+				v = v[1 : len(v)-1]
+			}
+			// Only set if not already provided by real env var
+			if viper.GetString(k) == "" {
+				viper.Set(k, v)
+			}
+		}
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Loaded env from: %s\n", abs)
+		}
+		return // stop after first found .env
 	}
 }
 

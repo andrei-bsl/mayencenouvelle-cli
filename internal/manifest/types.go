@@ -88,20 +88,52 @@ type Metadata struct {
 
 // Spec holds the full deployment specification.
 type Spec struct {
-	Enabled      bool         `yaml:"enabled"`
-	Type         string       `yaml:"type"` // coolify-app | systemd-service | scheduled-job | external
-	Capabilities Capabilities `yaml:"capabilities"`
-	Repository   Repository   `yaml:"repository"`
-	Build        Build        `yaml:"build"`
-	Runtime      Runtime      `yaml:"runtime"`
-	Domains      Domains      `yaml:"domains"`
-	Environment  Env          `yaml:"environment"`
-	Auth         Auth         `yaml:"authentication"`
-	Traefik      TraefikSpec  `yaml:"traefik"`
-	Dependencies []string     `yaml:"dependencies"`
-	Node         string       `yaml:"node"`
-	Schedule     string       `yaml:"schedule"`
-	Note         string       `yaml:"note"`
+	Enabled              bool              `yaml:"enabled"`
+	Type                 string            `yaml:"type"` // coolify-app | systemd-service | scheduled-job | external
+	Capabilities         Capabilities      `yaml:"capabilities"`
+	Repository           Repository        `yaml:"repository"`
+	Build                Build             `yaml:"build"`
+	Runtime              Runtime           `yaml:"runtime"`
+	Domains              Domains           `yaml:"domains"`
+	Environment          Env               `yaml:"environment"`
+	EnvironmentOverrides map[string]Env    `yaml:"environment_overrides,omitempty"`
+	Secrets              Secrets           `yaml:"secrets"`
+	Auth                 Auth              `yaml:"authentication"`
+	Traefik              TraefikSpec       `yaml:"traefik"`
+	Dependencies         []string          `yaml:"dependencies"`
+	Node                 string            `yaml:"node"`
+	Schedule             string            `yaml:"schedule"`
+	Note                 string            `yaml:"note"`
+}
+
+// ApplyStageOverrides merges environment_overrides[stage] into the base
+// environment map. Only keys present in the override are replaced;
+// all other base keys are preserved.
+func (a *AppConfig) ApplyStageOverrides(stage string) {
+	overrides, ok := a.Spec.EnvironmentOverrides[stage]
+	if !ok {
+		return
+	}
+	if a.Spec.Environment == nil {
+		a.Spec.Environment = make(Env)
+	}
+	for k, v := range overrides {
+		a.Spec.Environment[k] = v
+	}
+}
+
+// Secrets defines OpenBao vault integration for this app.
+// vault_path is the default KV v2 path; inject maps vault keys to env vars.
+type Secrets struct {
+	VaultPath string         `yaml:"vault_path,omitempty"` // e.g. mn/data/apps/internal-api
+	Inject    []SecretInject `yaml:"inject,omitempty"`
+}
+
+// SecretInject maps a vault key to a Coolify environment variable.
+type SecretInject struct {
+	Env       string `yaml:"env"`        // env var name, e.g. AUTHENTIK_CLIENT_ID
+	VaultKey  string `yaml:"vault_key"`  // key within the vault secret, e.g. client_id
+	VaultPath string `yaml:"vault_path,omitempty"` // override path for cross-app refs
 }
 
 // Capabilities declares which platform features to activate.
@@ -184,6 +216,15 @@ type Auth struct {
 type TraefikSpec struct {
 	Middlewares []string          `yaml:"middlewares"`
 	ExtraLabels map[string]string `yaml:"extra_labels"`
+}
+
+// EffectiveVaultPath returns the vault_path from secrets block,
+// falling back to the auto-derived VaultPath() if not explicitly set.
+func (a *AppConfig) EffectiveVaultPath() string {
+	if a.Spec.Secrets.VaultPath != "" {
+		return a.Spec.Secrets.VaultPath
+	}
+	return a.VaultPath()
 }
 
 // AppSlug returns the Authentik application slug: "mn-{name}".

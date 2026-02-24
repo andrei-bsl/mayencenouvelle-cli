@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -25,9 +27,15 @@ func isProductionStage(stage string) bool {
 // applyStage overrides the manifest branch for the target stage:
 //   - dev (default): use manifest branch as-is (e.g. develop)
 //   - prod: override to "main" — Coolify production resource tracks the main branch
+//
+// Also applies environment_overrides[stage] if present, merging
+// stage-specific env vars on top of the base environment.
 func applyStage(app *manifest.AppConfig, stage string) {
 	if isProductionStage(stage) {
 		app.Spec.Repository.Branch = "main"
+		app.ApplyStageOverrides("prod")
+	} else {
+		app.ApplyStageOverrides(stage)
 	}
 }
 
@@ -123,28 +131,86 @@ Examples:
 			}
 		}
 
-		// ── 2b. Vault: persist Authentik credentials ────────────────────────
+		// ── 2b. Vault: persist Authentik credentials + derived URLs ─────────
 		vaultClient := vault.NewClient(
 			viper.GetString("BAO_ADDR"),
 			viper.GetString("BAO_TOKEN"),
 			viper.GetString("BAO_NAMESPACE"),
 		)
 		if vaultClient.Enabled() && clientID != "" {
-			step("Vault", fmt.Sprintf("Saving OIDC credentials → %s", app.VaultPath()))
-			err := vaultClient.KVWrite(ctx, app.VaultPath(), map[string]string{
+			authentikURL := viper.GetString("AUTHENTIK_URL")
+			slug := app.AppSlug()
+			vaultData := map[string]string{
 				"authentik_client_id":     clientID,
 				"authentik_client_secret": clientSecret,
-			})
+				"authentik_slug":          slug,
+				"authentik_url":           authentikURL,
+				"authentik_authority_url": authentikURL + "/application/o/" + slug + "/",
+				"authentik_jwks_uri":      authentikURL + "/application/o/" + slug + "/jwks/",
+				"authentik_issuer":        authentikURL + "/application/o/" + slug + "/",
+				"authentik_logout_url":    authentikURL + "/application/o/" + slug + "/end-session/",
+			}
+			step("Vault", fmt.Sprintf("Saving OIDC credentials + URLs → %s", app.VaultPath()))
+			err := vaultClient.KVWrite(ctx, app.VaultPath(), vaultData)
 			if err != nil {
 				// Non-fatal: log warning and continue deployment
 				fmt.Printf("  %s [Vault] could not save credentials: %v\n",
 					color.YellowString("⚠"), err)
 			} else {
-				ok("Vault", fmt.Sprintf("credentials saved to %s", app.VaultPath()))
+				ok("Vault", fmt.Sprintf("credentials saved (%d keys) to %s", len(vaultData), app.VaultPath()))
 			}
 		} else if !vaultClient.Enabled() && clientID != "" {
 			fmt.Printf("  %s [Vault] BAO_ADDR/BAO_TOKEN not configured — skipping credential save\n",
 				color.YellowString("⚠"))
+		}
+
+		// ── 2c. Vault: resolve secrets.inject → env vars ─────────────────────
+		if vaultClient.Enabled() && len(app.Spec.Secrets.Inject) > 0 {
+			step("Vault", fmt.Sprintf("Resolving %d secret injection(s)", len(app.Spec.Secrets.Inject)))
+			injected := 0
+			for _, si := range app.Spec.Secrets.Inject {
+				path := si.VaultPath
+				if path == "" {
+					path = app.EffectiveVaultPath()
+				}
+				data, err := vaultClient.KVRead(ctx, path)
+				if err != nil {
+					fmt.Printf("  %s [Vault] read %s: %v\n", color.YellowString("⚠"), path, err)
+					continue
+				}
+				if data == nil {
+					fmt.Printf("  %s [Vault] %s not found — skipping %s\n",
+						color.YellowString("⚠"), path, si.Env)
+					continue
+				}
+				val, exists := data[si.VaultKey]
+				if !exists {
+					fmt.Printf("  %s [Vault] key %q not found in %s — skipping %s\n",
+						color.YellowString("⚠"), si.VaultKey, path, si.Env)
+					continue
+				}
+				if app.Spec.Environment == nil {
+					app.Spec.Environment = make(manifest.Env)
+				}
+				app.Spec.Environment[si.Env] = fmt.Sprintf("%v", val)
+				injected++
+			}
+			ok("Vault", fmt.Sprintf("%d/%d secrets injected into env", injected, len(app.Spec.Secrets.Inject)))
+		}
+
+		// ── 2d. Vault: resolve ${vault:path#key} refs in environment ─────────
+		if vaultClient.Enabled() {
+			vaultRefCache := make(map[string]map[string]interface{})
+			for envKey, envVal := range app.Spec.Environment {
+				resolved, err := resolveVaultRefs(ctx, vaultClient, envVal, vaultRefCache)
+				if err != nil {
+					fmt.Printf("  %s [Vault] resolving %s: %v\n", color.YellowString("⚠"), envKey, err)
+					continue
+				}
+				if resolved != envVal {
+					app.Spec.Environment[envKey] = resolved
+				}
+			}
 		}
 
 		// ── 3. Coolify service ────────────────────────────────────────────────
@@ -153,10 +219,12 @@ Examples:
 			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
-		// Inject Authentik credentials into env if present
+		// Inject Authentik credentials into env if present.
+		// Replace hyphens with underscores — shell variable names cannot contain hyphens.
 		if clientID != "" {
-			app.Spec.Environment[app.Metadata.Name+"_AUTHENTIK_CLIENT_ID"] = clientID
-			app.Spec.Environment[app.Metadata.Name+"_AUTHENTIK_CLIENT_SECRET"] = clientSecret
+			envPrefix := strings.ReplaceAll(strings.ToUpper(app.Metadata.Name), "-", "_")
+			app.Spec.Environment[envPrefix+"_AUTHENTIK_CLIENT_ID"] = clientID
+			app.Spec.Environment[envPrefix+"_AUTHENTIK_CLIENT_SECRET"] = clientSecret
 		}
 		svc, err := coolifyClient.EnsureApp(ctx, app, base)
 		if err != nil {
@@ -168,6 +236,15 @@ Examples:
 			appID = svc.ID
 		}
 		ok("Coolify", fmt.Sprintf("service %s ready (uuid: %s)", svc.Name, appID))
+
+		// ── 3b. Sync environment variables to Coolify ─────────────────────────
+		if len(app.Spec.Environment) > 0 {
+			step("Coolify", fmt.Sprintf("Syncing %d environment variable(s)", len(app.Spec.Environment)))
+			if err := coolifyClient.UpdateEnvVars(ctx, appID, app.Spec.Environment); err != nil {
+				return fmt.Errorf("coolify env vars: %w", err)
+			}
+			ok("Coolify", fmt.Sprintf("%d env var(s) synced", len(app.Spec.Environment)))
+		}
 
 		// ── 4. Trigger Coolify deploy ─────────────────────────────────────────
 		step("Coolify", "Triggering deployment")
@@ -308,4 +385,55 @@ func step(component, msg string) {
 // ok prints a successful step result.
 func ok(component, msg string) {
 	fmt.Printf("  %s [%s] %s\n", color.GreenString("✓"), component, msg)
+}
+
+// vaultRefPattern matches ${vault:mn/data/path#key} references in env values.
+var vaultRefPattern = regexp.MustCompile(`\$\{vault:([^#}]+)#([^}]+)\}`)
+
+// resolveVaultRefs replaces all ${vault:path#key} references in a string
+// with actual values from OpenBao. Uses a cache to avoid repeated reads
+// of the same vault path.
+func resolveVaultRefs(
+	ctx context.Context,
+	vc *vault.Client,
+	value string,
+	cache map[string]map[string]interface{},
+) (string, error) {
+	if !strings.Contains(value, "${vault:") {
+		return value, nil
+	}
+
+	var lastErr error
+	resolved := vaultRefPattern.ReplaceAllStringFunc(value, func(match string) string {
+		subs := vaultRefPattern.FindStringSubmatch(match)
+		if len(subs) != 3 {
+			return match
+		}
+		path, key := subs[1], subs[2]
+
+		// Check cache first
+		data, cached := cache[path]
+		if !cached {
+			var err error
+			data, err = vc.KVRead(ctx, path)
+			if err != nil {
+				lastErr = fmt.Errorf("read %s: %w", path, err)
+				return match
+			}
+			if data == nil {
+				lastErr = fmt.Errorf("secret %s not found", path)
+				return match
+			}
+			cache[path] = data
+		}
+
+		val, ok := data[key]
+		if !ok {
+			lastErr = fmt.Errorf("key %q not found in %s", key, path)
+			return match
+		}
+		return fmt.Sprintf("%v", val)
+	})
+
+	return resolved, lastErr
 }

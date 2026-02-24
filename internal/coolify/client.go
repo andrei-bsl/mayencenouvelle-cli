@@ -223,21 +223,64 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 	return existing, nil
 }
 
-// UpdateEnvVars merges the given env var map into the Coolify service configuration.
-// Existing vars not in the provided map are preserved.
-func (c *Client) UpdateEnvVars(ctx context.Context, serviceID string, vars map[string]string) error {
-	// GET existing env vars first
-	var existing map[string]string
-	if err := c.http.Get(ctx, "/api/v1/applications/"+serviceID+"/envs", &existing); err != nil {
+// UpdateEnvVars syncs the desired env var map into a Coolify application.
+//
+// Algorithm:
+//  1. GET existing env vars from Coolify (array of objects).
+//  2. For each desired key:
+//     - If the key exists with the same value → skip (idempotent).
+//     - If the key exists with a different value → DELETE old + POST new.
+//     - If the key doesn't exist → POST to create.
+//
+// Uses DELETE+POST instead of PATCH for updates because Coolify env var UUIDs
+// may become stale after app delete/recreate cycles (PATCH returns 404).
+// Existing vars not in the desired map are preserved (additive merge).
+func (c *Client) UpdateEnvVars(ctx context.Context, appUUID string, desired map[string]string) error {
+	basePath := "/api/v1/applications/" + appUUID + "/envs"
+
+	// GET existing env vars — Coolify returns [{uuid, key, value, is_preview, ...}]
+	var existing []struct {
+		UUID      string `json:"uuid"`
+		Key       string `json:"key"`
+		Value     string `json:"value"`
+		IsPreview bool   `json:"is_preview"`
+	}
+	if err := c.http.Get(ctx, basePath, &existing); err != nil {
 		return fmt.Errorf("get env vars: %w", err)
 	}
-	// Merge
-	for k, v := range vars {
-		existing[k] = v
+
+	// Build lookup: key → {uuid, value} (non-preview entries only)
+	type entry struct {
+		UUID  string
+		Value string
 	}
-	// PUT merged set
-	if err := c.http.Put(ctx, "/api/v1/applications/"+serviceID+"/envs", existing, nil); err != nil {
-		return fmt.Errorf("update env vars: %w", err)
+	byKey := make(map[string]entry, len(existing))
+	for _, e := range existing {
+		if e.IsPreview {
+			continue
+		}
+		byKey[e.Key] = entry{UUID: e.UUID, Value: e.Value}
+	}
+
+	for key, value := range desired {
+		if e, ok := byKey[key]; ok {
+			if e.Value == value {
+				continue // already correct
+			}
+			// Delete stale entry, then create fresh (avoids UUID staleness issues)
+			_ = c.http.Delete(ctx, basePath+"/"+e.UUID) // best-effort delete
+		}
+		// Create env var (runtime-only: avoids build-time sourcing issues
+		// where hyphens in keys or NODE_ENV=production break the build).
+		payload := map[string]interface{}{
+			"key":          key,
+			"value":        value,
+			"is_preview":   false,
+			"is_buildtime": false,
+		}
+		if err := c.http.Post(ctx, basePath, payload, nil); err != nil {
+			return fmt.Errorf("create env %s: %w", key, err)
+		}
 	}
 	return nil
 }
