@@ -79,6 +79,10 @@ type Metadata struct {
 	Description string            `yaml:"description"`
 	Team        string            `yaml:"team"`
 	Phase       string            `yaml:"phase"`
+	// Category determines the vault path prefix for secret storage:
+	// mn/{category}/{app-name}. Valid values: apps, integrations, infra,
+	// iot, platform, cicd, experimental, external, legacy. Default: apps.
+	Category    string            `yaml:"category,omitempty"`
 	Labels      map[string]string `yaml:"labels"`
 }
 
@@ -186,6 +190,22 @@ type TraefikSpec struct {
 // Slugs are unique, kebab-case identifiers used for API lookup.
 func (a *AppConfig) AppSlug() string {
 	return "mn-" + a.Metadata.Name
+}
+
+// VaultCategory returns the vault path category for this app.
+// Defaults to "apps" if not specified in the manifest.
+func (a *AppConfig) VaultCategory() string {
+	if a.Metadata.Category != "" {
+		return a.Metadata.Category
+	}
+	return "apps"
+}
+
+// VaultPath returns the full KV v2 secret path for this app.
+// Format: mn/data/{category}/{app-name}  (API path for KV v2)
+// Example: mn/data/apps/hello-world
+func (a *AppConfig) VaultPath() string {
+	return "mn/data/" + a.VaultCategory() + "/" + a.Metadata.Name
 }
 
 // ProviderName returns the Authentik OAuth2 provider name: "mn-{name}-provider".

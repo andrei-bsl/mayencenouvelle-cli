@@ -10,6 +10,7 @@ import (
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/vault"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -120,6 +121,30 @@ Examples:
 				// Non-fatal: log and continue (resource may not exist)
 				fmt.Printf("  %s [Authentik] cleanup skipped: %v\n", color.YellowString("⚠"), err)
 			}
+		}
+
+		// ── 2b. Vault: persist Authentik credentials ────────────────────────
+		vaultClient := vault.NewClient(
+			viper.GetString("BAO_ADDR"),
+			viper.GetString("BAO_TOKEN"),
+			viper.GetString("BAO_NAMESPACE"),
+		)
+		if vaultClient.Enabled() && clientID != "" {
+			step("Vault", fmt.Sprintf("Saving OIDC credentials → %s", app.VaultPath()))
+			err := vaultClient.KVWrite(ctx, app.VaultPath(), map[string]string{
+				"authentik_client_id":     clientID,
+				"authentik_client_secret": clientSecret,
+			})
+			if err != nil {
+				// Non-fatal: log warning and continue deployment
+				fmt.Printf("  %s [Vault] could not save credentials: %v\n",
+					color.YellowString("⚠"), err)
+			} else {
+				ok("Vault", fmt.Sprintf("credentials saved to %s", app.VaultPath()))
+			}
+		} else if !vaultClient.Enabled() && clientID != "" {
+			fmt.Printf("  %s [Vault] BAO_ADDR/BAO_TOKEN not configured — skipping credential save\n",
+				color.YellowString("⚠"))
 		}
 
 		// ── 3. Coolify service ────────────────────────────────────────────────
