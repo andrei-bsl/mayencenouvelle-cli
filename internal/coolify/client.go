@@ -105,6 +105,15 @@ func (c *Client) GetAppByNameAndBranch(ctx context.Context, name, branch string)
 	return nil, nil
 }
 
+// GetApp fetches a single Coolify application by UUID.
+func (c *Client) GetApp(ctx context.Context, uuid string) (*App, error) {
+	var app App
+	if err := c.http.Get(ctx, "/api/v1/applications/"+uuid, &app); err != nil {
+		return nil, fmt.Errorf("get application %s: %w", uuid, err)
+	}
+	return &app, nil
+}
+
 // GetAppsByName returns ALL Coolify application resources with the given name
 // across all environments (development, production).
 // Multiple resources exist when the same app is deployed for both develop and main branches.
@@ -323,6 +332,14 @@ func (c *Client) RollbackToDeployment(ctx context.Context, serviceID, deployment
 func (c *Client) Stop(ctx context.Context, serviceUUID string) error {
 	if err := c.http.Post(ctx, "/api/v1/applications/"+serviceUUID+"/stop", nil, nil); err != nil {
 		return fmt.Errorf("stop application: %w", err)
+	}
+	return nil
+}
+
+// Restart restarts a Coolify application container.
+func (c *Client) Restart(ctx context.Context, serviceUUID string) error {
+	if err := c.http.Post(ctx, "/api/v1/applications/"+serviceUUID+"/restart", nil, nil); err != nil {
+		return fmt.Errorf("restart application: %w", err)
 	}
 	return nil
 }

@@ -9,12 +9,17 @@
 package traefik
 
 import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
 	"gopkg.in/yaml.v3"
@@ -26,6 +31,7 @@ type Client struct {
 }
 
 var invalidRouterChars = regexp.MustCompile(`[^a-zA-Z0-9-]+`)
+var hostRuleRegex = regexp.MustCompile("Host\\(`([^`]+)`\\)")
 
 // NewClient creates a Traefik client.
 //
@@ -164,6 +170,10 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 	if cfg.HTTP.Routers == nil {
 		cfg.HTTP.Routers = make(map[string]router)
 	}
+	staticHosts, err := c.loadStaticPublicHosts()
+	if err != nil {
+		return err
+	}
 
 	prefix := managedRouterPrefix(app)
 	for key := range cfg.HTTP.Routers {
@@ -173,10 +183,15 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 	}
 
 	hosts := splitDomains(domains.Public)
-	for i, host := range hosts {
+	writeIndex := 0
+	for _, host := range hosts {
+		if _, exists := staticHosts[host]; exists {
+			continue // Already declared in static file; avoid duplicate routers.
+		}
+		writeIndex++
 		name := prefix + "-public"
-		if i > 0 {
-			name = fmt.Sprintf("%s-public-%d", prefix, i+1)
+		if writeIndex > 1 {
+			name = fmt.Sprintf("%s-public-%d", prefix, writeIndex)
 		}
 		cfg.HTTP.Routers[name] = router{
 			Rule:        buildHostRule(host),
@@ -187,6 +202,31 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 	}
 
 	return c.writeManagedPublicConfig(cfg)
+}
+
+func (c *Client) loadStaticPublicHosts() (map[string]struct{}, error) {
+	path := filepath.Join(c.configDir, "coolify-apps-public.yml")
+	hosts := make(map[string]struct{})
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return hosts, nil
+		}
+		return nil, fmt.Errorf("reading static public config %s: %w", path, err)
+	}
+	var cfg dynamicConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing static public config %s: %w", path, err)
+	}
+	for _, r := range cfg.HTTP.Routers {
+		matches := hostRuleRegex.FindAllStringSubmatch(r.Rule, -1)
+		for _, m := range matches {
+			if len(m) == 2 && m[1] != "" {
+				hosts[m[1]] = struct{}{}
+			}
+		}
+	}
+	return hosts, nil
 }
 
 // RemoveManagedPublicRouters deletes all managed public routers for an app+stage.
@@ -217,6 +257,69 @@ func (c *Client) RemoveManagedPublicRouters(app *manifest.AppConfig) error {
 		return nil
 	}
 	return c.writeManagedPublicConfig(cfg)
+}
+
+// MissingHostsFromAPI checks Traefik's runtime router list and returns expected
+// public hosts that are not currently present in any Host(`...`) rule.
+func (c *Client) MissingHostsFromAPI(ctx context.Context, apiBaseURL string, expectedHosts []string, insecure bool) ([]string, error) {
+	if apiBaseURL == "" {
+		return nil, fmt.Errorf("traefik api url is empty")
+	}
+	if len(expectedHosts) == 0 {
+		return nil, nil
+	}
+	url := strings.TrimRight(apiBaseURL, "/")
+	if !strings.HasSuffix(url, "/api/http/routers") {
+		url += "/api/http/routers"
+	}
+
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}, // #nosec G402
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building traefik api request: %w", err)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling traefik api: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("traefik api returned status %d", resp.StatusCode)
+	}
+
+	var routers []struct {
+		Rule string `json:"rule"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&routers); err != nil {
+		return nil, fmt.Errorf("decoding traefik routers response: %w", err)
+	}
+	seen := make(map[string]struct{})
+	for _, r := range routers {
+		matches := hostRuleRegex.FindAllStringSubmatch(r.Rule, -1)
+		for _, m := range matches {
+			if len(m) == 2 && m[1] != "" {
+				seen[m[1]] = struct{}{}
+			}
+		}
+	}
+
+	missing := make([]string, 0)
+	for _, host := range expectedHosts {
+		h := strings.TrimSpace(host)
+		if h == "" {
+			continue
+		}
+		if _, ok := seen[h]; !ok {
+			missing = append(missing, h)
+		}
+	}
+	sort.Strings(missing)
+	return missing, nil
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

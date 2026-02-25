@@ -220,13 +220,6 @@ Examples:
 			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
-		// Inject Authentik credentials into env if present.
-		// Replace hyphens with underscores — shell variable names cannot contain hyphens.
-		if clientID != "" {
-			envPrefix := strings.ReplaceAll(strings.ToUpper(app.Metadata.Name), "-", "_")
-			app.Spec.Environment[envPrefix+"_AUTHENTIK_CLIENT_ID"] = clientID
-			app.Spec.Environment[envPrefix+"_AUTHENTIK_CLIENT_SECRET"] = clientSecret
-		}
 		svc, err := coolifyClient.EnsureApp(ctx, app, base)
 		if err != nil {
 			return fmt.Errorf("coolify: %w", err)
@@ -250,11 +243,29 @@ Examples:
 		// ── 3c. Traefik public routers (managed file) ────────────────────────
 		if app.Spec.Type == "coolify-app" && app.NormalizedDomains().Public != "" {
 			step("Traefik", "Reconciling managed public app routers")
-			traefikClient := traefik.NewClient(resolveTraefikConfigDir(manifestsDir))
+			traefikDir := resolveTraefikConfigDir(manifestsDir)
+			traefikClient := traefik.NewClient(traefikDir)
 			if err := traefikClient.SyncManagedPublicRouters(app); err != nil {
 				return fmt.Errorf("traefik managed routers: %w", err)
 			}
 			ok("Traefik", "managed public routers synced")
+
+			step("Traefik", "Syncing router files to runtime host")
+			synced, err := syncTraefikRuntimeFiles(traefikDir)
+			if err != nil {
+				return fmt.Errorf("traefik runtime sync: %w", err)
+			}
+			if synced {
+				ok("Traefik", "runtime dynamic config synced")
+			} else {
+				fmt.Printf("  %s [Traefik] runtime sync skipped (set MN_TRAEFIK_RUNTIME_SSH_TARGET or MN_RUNTIME_SSH_TARGET)\n", color.YellowString("⚠"))
+			}
+
+			step("Traefik", "Verifying public routers via Traefik API")
+			if err := verifyTraefikPublicRouters(ctx, traefikClient, app, base); err != nil {
+				return fmt.Errorf("traefik router verification: %w", err)
+			}
+			ok("Traefik", "public routers present in runtime API")
 		}
 
 		// ── 4. Trigger Coolify deploy ─────────────────────────────────────────
@@ -273,6 +284,10 @@ Examples:
 			return fmt.Errorf("health check failed: %w", err)
 		}
 		ok("Health", "service is healthy")
+
+		if err := ensureCoolifyRuntimeContainer(ctx, coolifyClient, appID); err != nil {
+			return fmt.Errorf("runtime container validation: %w", err)
+		}
 
 		// ── 6. GitHub webhooks ──────────────────────────────────────────────────
 		// Register one webhook per Coolify resource for this app.

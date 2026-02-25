@@ -50,6 +50,11 @@ Environment variables (required for deployment commands):
 | `AUTHENTIK_URL`        | Authentik base URL                   |
 | `AUTHENTIK_API_TOKEN`  | Authentik API token                  |
 | `TRAEFIK_CONFIG_DIR`   | Path to Traefik dynamic config dir   |
+| `MN_RUNTIME_SSH_TARGET` | SSH target for runtime host checks (e.g. `andrei@192.168.178.10`) |
+| `MN_TRAEFIK_RUNTIME_SSH_TARGET` | Optional SSH target for Traefik file sync (defaults to `MN_RUNTIME_SSH_TARGET`) |
+| `MN_TRAEFIK_RUNTIME_DYNAMIC_DIR` | Runtime Traefik dynamic dir (default: `/srv/docker/infra/traefik/dynamic`) |
+| `MN_TRAEFIK_API_URL`   | Traefik API base URL for router verification (default: `base.yaml` `traefik.admin_endpoint`) |
+| `MN_TRAEFIK_API_INSECURE` | `true` to skip TLS verification for Traefik API |
 | `GITHUB_TOKEN`         | GitHub PAT (scope: admin:repo_hook)  |
 
 Or use a config file (default `~/.mayence.yaml`):
@@ -93,6 +98,11 @@ mayence rotate nas-app              # rotate Authentik OAuth2 secret + redeploy
 # Recovery
 mayence rollback nas-app            # roll back to previous Coolify deployment
 ```
+
+For `coolify-app` manifests with `domains.public`, deploy also performs:
+- Traefik runtime file sync to the runtime host (if SSH target configured),
+- Traefik router presence verification via API,
+- Coolify runtime self-heal restart if API status is running but the container is missing on runtime host.
 
 ## Manifest Schema
 
