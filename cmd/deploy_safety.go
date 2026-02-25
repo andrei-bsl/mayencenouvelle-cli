@@ -97,6 +97,15 @@ func verifyTraefikPublicRouters(ctx context.Context, tf *traefik.Client, app *ma
 	insecure := strings.EqualFold(strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_INSECURE")), "true")
 	missing, err := tf.MissingHostsFromAPI(ctx, apiURL, hosts, insecure)
 	if err != nil {
+		// Common homelab case: self-signed internal cert not trusted by local OS trust store.
+		// Retry once with TLS verify disabled so deploy does not fail on local trust issues.
+		if !insecure && isCertAuthorityError(err) {
+			fmt.Printf("  %s [Traefik] certificate not trusted locally for %s — retrying with insecure TLS\n",
+				"\033[33m⚠\033[0m", apiURL)
+			missing, err = tf.MissingHostsFromAPI(ctx, apiURL, hosts, true)
+		}
+	}
+	if err != nil {
 		// Traefik API port (8080) is only accessible from within the lab network.
 		// When running from a dev machine, connection refused or network unreachable
 		// is expected — downgrade to a warning so the deploy still proceeds.
@@ -156,6 +165,12 @@ func isNetworkUnreachable(err error) bool {
 		}
 	}
 	return false
+}
+
+func isCertAuthorityError(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "certificate signed by unknown authority") ||
+		strings.Contains(s, "x509: ")
 }
 
 func ensureCoolifyRuntimeContainer(ctx context.Context, coolifyClient *coolify.Client, appUUID string) error {
