@@ -13,7 +13,7 @@ func TestDefaultsApplied(t *testing.T) {
 		Spec: Spec{
 			Runtime:      Runtime{Port: 3000},
 			Capabilities: Capabilities{},
-			Domains:      Domains{Internal: "test.internal"},
+			Domains:      Domains{Private: "test.internal"},
 		},
 	}
 

@@ -9,7 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 - Automatic Traefik public-router reconciliation during `deploy` for apps with
-  `domains.external`:
+  `domains.public`:
   - Writes/updates `coolify-apps-public-managed.yml` in Traefik dynamic config dir
   - Creates one explicit `Host(...)` router per external hostname (stage-aware, e.g. `dev-*`)
   - Preserves manually maintained Traefik files (no in-place rewrite)

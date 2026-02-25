@@ -106,7 +106,7 @@ func (c *Client) GetAppByNameAndBranch(ctx context.Context, name, branch string)
 }
 
 // GetAppsByName returns ALL Coolify application resources with the given name
-// across all environments (development-internal, production-internal, etc.).
+// across all environments (development, production).
 // Multiple resources exist when the same app is deployed for both develop and main branches.
 // Each matching app is fetched individually to ensure full data (e.g. ManualWebhookSecretGithub
 // is omitted from the list response but present in the individual GET response).
@@ -408,7 +408,7 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 		buildPack = "dockerfile"
 	}
 
-	// Get environment name based on branch + exposure (development-internal, development, etc.)
+	// Get environment name based on branch (development or production).
 	envName := app.GetEnvironmentStage()
 
 	repoURL := app.Spec.Repository.URL
@@ -448,21 +448,14 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 	return payload
 }
 
-// mapEnvironment maps branch + exposure to Coolify environment name
+// mapEnvironment maps branch to Coolify environment name.
+// Exposure no longer influences environment selection.
 func mapEnvironment(branch, exposure string) string {
 	isProduction := branch == "main" || branch == "master"
-	isInternal := exposure == "internal"
-
-	switch {
-	case isProduction && isInternal:
-		return "production-internal"
-	case isProduction && !isInternal:
+	if isProduction {
 		return "production"
-	case !isProduction && isInternal:
-		return "development-internal"
-	default:
-		return "development"
 	}
+	return "development"
 }
 
 // buildCoolifyUpdatePayload builds payload for PATCH /api/v1/applications/{uuid}
@@ -495,59 +488,32 @@ func buildCoolifyUpdatePayload(app *manifest.AppConfig, domains string) map[stri
 
 // buildFQDN constructs the fully qualified domain list for the app.
 // Domain mapping:
-//   - exposure=internal: domains.internal (comma-separated), emitted as http://
-//   - exposure=external: domains.external (comma-separated), emitted as http://
-//   - exposure=both: domains.external as http:// + domains.internal as http://
+//   - domains.public (comma-separated), emitted as http://
+//   - domains.private (comma-separated), emitted as http://
 //
 // Stage prefixing ("dev-") is applied to each hostname entry.
 func buildFQDN(app *manifest.AppConfig) string {
 	name := app.Metadata.Name
 	isProduction := app.Spec.Repository.Branch == "main" || app.Spec.Repository.Branch == "master"
-	exposure := app.Spec.Capabilities.Exposure
-	isInternal := exposure == "internal"
-	isBoth := exposure == "both"
+	domains := app.GetDomains()
 
 	// Determine environment prefix
 	envPrefix := ""
 	if !isProduction {
 		envPrefix = "dev-"
 	}
-
-	// ── Internal-only apps ──────────────────────────────────────────────────────
-	// domains.internal is a comma-separated list of hostnames — all served via
-	// http:// in Coolify (central Traefik handles TLS termination).
-	// Typical pattern: "app.apps.mayencenouvelle.internal,app.internal.apps.mayencenouvelle.com"
-	// The second entry (alt public domain) is used by Authentik redirect URIs and
-	// split-DNS users who reach the app via the public DNS alias.
-	// The list is declared entirely in the manifest — no values are derived here.
-	if isInternal {
-		rawInternal := app.Spec.Domains.Internal
-		if rawInternal == "" {
-			rawInternal = fmt.Sprintf("%s.apps.mayencenouvelle.internal", name)
-		}
-		return prefixDomainList(rawInternal, envPrefix, "http")
+	var entries []string
+	if domains.Public != "" {
+		entries = append(entries, prefixDomainList(domains.Public, envPrefix, "http"))
 	}
-
-	// ── External (public) domain ─────────────────────────────────────────────────
-	externalDomain := app.Spec.Domains.External
-	if externalDomain == "" {
-		externalDomain = fmt.Sprintf("%s.apps.mayencenouvelle.com", name)
+	if domains.Private != "" {
+		entries = append(entries, prefixDomainList(domains.Private, envPrefix, "http"))
 	}
-	// IMPORTANT: keep Coolify domains on http:// for central-Traefik forwarding.
-	// Central Traefik terminates TLS and forwards plain HTTP to coolify-proxy:80.
-	// Using https:// here makes Coolify emit redirect-to-https routers and causes
-	// infinite 307 loops when requests already arrive via HTTPS at the edge.
-	externalFQDN := prefixDomainList(externalDomain, envPrefix, "http")
-
-	// ── Both-zone apps: also include the internal domain ─────────────────────────
-	// Use http:// for the internal entry so Coolify→Traefik forwarding works
-	// (same convention as pure internal apps).
-	if isBoth && app.Spec.Domains.Internal != "" {
-		internalFQDN := prefixDomainList(app.Spec.Domains.Internal, envPrefix, "http")
-		return fmt.Sprintf("%s,%s", externalFQDN, internalFQDN)
+	if len(entries) > 0 {
+		return strings.Join(entries, ",")
 	}
-
-	return externalFQDN
+	// Defensive fallback for incomplete manifests.
+	return prefixDomainList(fmt.Sprintf("%s.apps.mayencenouvelle.internal", name), envPrefix, "http")
 }
 
 func prefixDomainList(raw, envPrefix, scheme string) string {

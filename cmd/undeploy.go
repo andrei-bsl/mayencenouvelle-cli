@@ -122,7 +122,7 @@ Examples:
 			ok("Coolify", fmt.Sprintf("%s deleted from Coolify", appName))
 
 			// Keep managed Traefik public router file in sync with app lifecycle.
-			if app.Spec.Type == "coolify-app" && app.Spec.Domains.External != "" {
+			if app.Spec.Type == "coolify-app" && app.NormalizedDomains().Public != "" {
 				step("Traefik", "Removing managed public app routers")
 				traefikClient := traefik.NewClient(resolveTraefikConfigDir(manifestsDir))
 				if err := traefikClient.RemoveManagedPublicRouters(app); err != nil {

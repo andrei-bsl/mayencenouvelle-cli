@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/common"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
@@ -303,13 +304,13 @@ func (c *Client) createOAuth2Provider(
 	base *manifest.BaseConfig,
 ) (*OAuth2Provider, error) {
 	payload := map[string]interface{}{
-		"name":              name,
-		"client_type":       clientType,
-		"redirect_uris":     redirectURIs,
-		"issuer_mode":       "per_provider",
+		"name":               name,
+		"client_type":        clientType,
+		"redirect_uris":      redirectURIs,
+		"issuer_mode":        "per_provider",
 		"authorization_flow": base.Authentik.AuthorizationFlow,
 		"invalidation_flow":  base.Authentik.InvalidationFlow,
-		"property_mappings": propertyMappings,
+		"property_mappings":  propertyMappings,
 	}
 	var provider OAuth2Provider
 	if err := c.http.Post(ctx, "/providers/oauth2/", payload, &provider); err != nil {
@@ -353,11 +354,8 @@ func (c *Client) patchApplication(ctx context.Context, slug string, providerPK i
 // used verbatim (all strict matching) and all auto-derivation is skipped.
 //
 // Otherwise the URIs are derived automatically from the app's domains:
-//   - Stage-prefixed internal domain (e.g. dev-vpn.apps.mayencenouvelle.internal)
-//   - Canonical internal domain (e.g. vpn.apps.mayencenouvelle.internal)
-//   - Alternate external domain for internal apps if base.Authentik.InternalAltDomainSuffix is set
-//     (e.g. vpn.internal.apps.mayencenouvelle.com / dev-vpn.internal.apps.mayencenouvelle.com)
-//   - External domains if exposure == external/both
+//   - Stage-prefixed private/public domain lists
+//   - Canonical private/public domain lists
 //   - Localhost entries if spec.authentication.localhost_ports is set
 //
 // This produces a URI set that covers dev, prod, and local development from a single provider.
@@ -370,64 +368,40 @@ func buildRedirectURIs(app *manifest.AppConfig, base *manifest.BaseConfig) []Red
 		}
 		return uris
 	}
-	stageDomains := app.GetDomains()  // stage-aware (dev-* prefix for develop branch)
-	specDomains := app.Spec.Domains  // canonical (no dev- prefix)
-	altSuffix := ""
-	if base != nil {
-		altSuffix = base.Authentik.InternalAltDomainSuffix
-	}
+	stageDomains := app.GetDomains()       // stage-aware (dev-* prefix for develop branch)
+	specDomains := app.NormalizedDomains() // canonical (no dev- prefix)
 
 	seen := make(map[string]struct{})
 	var uris []RedirectURI
 
-	addURI := func(scheme, host, path string) {
-		if host == "" || path == "" {
+	addURIs := func(scheme, hostsCSV, path string) {
+		if hostsCSV == "" || path == "" {
 			return
 		}
-		u := scheme + "://" + host + path
-		if _, ok := seen[u]; !ok {
-			seen[u] = struct{}{}
-			uris = append(uris, RedirectURI{MatchingMode: "strict", URL: u})
-		}
-	}
-
-	// domainPrefix extracts the leading hostname segment (before the first dot).
-	// E.g. "dev-vpn.apps.mayencenouvelle.internal" → "dev-vpn"
-	domainPrefix := func(domain string) string {
-		for i, ch := range domain {
-			if ch == '.' {
-				return domain[:i]
+		for _, host := range strings.Split(hostsCSV, ",") {
+			host = strings.TrimSpace(host)
+			if host == "" {
+				continue
+			}
+			u := scheme + "://" + host + path
+			if _, ok := seen[u]; !ok {
+				seen[u] = struct{}{}
+				uris = append(uris, RedirectURI{MatchingMode: "strict", URL: u})
 			}
 		}
-		return domain
 	}
 
 	for _, path := range app.Spec.Auth.RedirectPaths {
-		// Stage-aware internal domain (e.g. dev-vpn.apps...internal)
-		addURI("https", stageDomains.Internal, path)
-		// Canonical internal domain (e.g. vpn.apps...internal)
-		addURI("https", specDomains.Internal, path)
-
-		// Alternate external domain for internal apps
-		// e.g. vpn.apps.mayencenouvelle.internal → vpn.internal.apps.mayencenouvelle.com
-		if altSuffix != "" && app.Spec.Capabilities.Exposure == "internal" {
-			if stageDomains.Internal != "" {
-				addURI("https", domainPrefix(stageDomains.Internal)+"."+altSuffix, path)
-			}
-			if specDomains.Internal != "" {
-				addURI("https", domainPrefix(specDomains.Internal)+"."+altSuffix, path)
-			}
-		}
-
-		// External domains (for exposure=external or both)
-		addURI("https", stageDomains.External, path)
-		addURI("https", specDomains.External, path)
+		addURIs("https", stageDomains.Private, path)
+		addURIs("https", specDomains.Private, path)
+		addURIs("https", stageDomains.Public, path)
+		addURIs("https", specDomains.Public, path)
 	}
 
 	// Localhost for local dev
 	for _, port := range app.Spec.Auth.LocalhostPorts {
 		for _, path := range app.Spec.Auth.RedirectPaths {
-			addURI("http", fmt.Sprintf("localhost:%d", port), path)
+			addURIs("http", fmt.Sprintf("localhost:%d", port), path)
 		}
 	}
 

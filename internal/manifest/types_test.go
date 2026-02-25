@@ -19,9 +19,10 @@ func TestAppConfigValidate(t *testing.T) {
 				Kind:       "AppConfig",
 				Metadata:   Metadata{Name: "app1"},
 				Spec: Spec{
+					Type:         "coolify-app",
 					Runtime:      Runtime{Port: 3000},
 					Capabilities: Capabilities{Exposure: "internal"},
-					Domains:      Domains{Internal: "app1.internal"},
+					Domains:      Domains{Private: "app1.internal"},
 				},
 			},
 			wantErr: false,
@@ -37,19 +38,20 @@ func TestAppConfigValidate(t *testing.T) {
 			errMsg:  "apiVersion must be 'mnlab/v1'",
 		},
 		{
-			name: "exposure both without external domain",
+			name: "missing private and public domains",
 			app: &AppConfig{
 				APIVersion: "mnlab/v1",
 				Kind:       "AppConfig",
 				Metadata:   Metadata{Name: "app1"},
 				Spec: Spec{
+					Type:         "coolify-app",
 					Runtime:      Runtime{Port: 3000},
 					Capabilities: Capabilities{Exposure: "both"},
-					Domains:      Domains{Internal: "app.internal"},
+					Domains:      Domains{},
 				},
 			},
 			wantErr: true,
-			errMsg:  "domains.external is required when exposure=both",
+			errMsg:  "at least one of domains.private or domains.public is required",
 		},
 		{
 			name: "systemd-service without node",
@@ -61,7 +63,7 @@ func TestAppConfigValidate(t *testing.T) {
 					Type:         "systemd-service",
 					Runtime:      Runtime{Port: 3000},
 					Capabilities: Capabilities{Exposure: "internal"},
-					Domains:      Domains{Internal: "app.internal"},
+					Domains:      Domains{Private: "app.internal"},
 				},
 			},
 			wantErr: true,
@@ -98,8 +100,8 @@ func TestProviderNameGeneration(t *testing.T) {
 		want    string
 	}{
 		{"nas-app", "mn-nas-app-provider"},
-			{"vpn-app", "mn-vpn-app-provider"},
-			{"internal-api", "mn-internal-api-provider"},
+		{"vpn-app", "mn-vpn-app-provider"},
+		{"internal-api", "mn-internal-api-provider"},
 	}
 
 	for _, tt := range tests {

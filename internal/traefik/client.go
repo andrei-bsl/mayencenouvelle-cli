@@ -125,18 +125,18 @@ func (c *Client) PlanRoutes(app *manifest.AppConfig) ([]PlanAction, error) {
 	domains := app.GetDomains()
 
 	var actions []PlanAction
-	if domains.Internal != "" {
+	if domains.Private != "" {
 		actions = append(actions, PlanAction{
 			Operation: op,
-			Resource:  "Traefik Router (internal)",
-			Detail:    buildHostRule(domains.Internal),
+			Resource:  "Traefik Router (private)",
+			Detail:    buildHostRule(domains.Private),
 		})
 	}
-	if domains.External != "" {
+	if domains.Public != "" {
 		actions = append(actions, PlanAction{
 			Operation: op,
-			Resource:  "Traefik Router (external)",
-			Detail:    buildHostRule(domains.External) + " + Let's Encrypt TLS",
+			Resource:  "Traefik Router (public)",
+			Detail:    buildHostRule(domains.Public) + " + Let's Encrypt TLS",
 		})
 	}
 	return actions, nil
@@ -151,7 +151,7 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 		return fmt.Errorf("traefik config dir is empty")
 	}
 	domains := app.GetDomains()
-	if domains.External == "" {
+	if domains.Public == "" {
 		return nil // nothing to manage
 	}
 
@@ -172,7 +172,7 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 		}
 	}
 
-	hosts := splitDomains(domains.External)
+	hosts := splitDomains(domains.Public)
 	for i, host := range hosts {
 		name := prefix + "-public"
 		if i > 0 {
@@ -251,7 +251,7 @@ func splitDomains(domains string) []string {
 func managedRouterPrefix(app *manifest.AppConfig) string {
 	name := app.Metadata.Name
 	stage := app.GetEnvironmentStage()
-	if stage == "development" || stage == "development-internal" {
+	if stage == "development" {
 		name = "dev-" + name
 	}
 	return sanitizeRouterName(name)
@@ -346,9 +346,8 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 	// Use GetDomains() to apply stage-based domain transformations (e.g., dev- prefix)
 	domains := app.GetDomains()
 
-	// Internal router
-	if domains.Internal != "" &&
-		(app.Spec.Capabilities.Exposure == "internal" || app.Spec.Capabilities.Exposure == "both") {
+	// Private router
+	if domains.Private != "" {
 
 		certResolver := ""
 		if app.Spec.Capabilities.TLS == "letsencrypt" {
@@ -356,7 +355,7 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 		}
 
 		r := router{
-			Rule:        buildHostRule(domains.Internal),
+			Rule:        buildHostRule(domains.Private),
 			Service:     svcName,
 			Entrypoints: []string{"websecure"},
 			Middlewares: middlewares,
@@ -364,15 +363,14 @@ func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {
 		if app.Spec.Capabilities.TLS != "none" {
 			r.TLS = &tlsCfg{CertResolver: certResolver}
 		}
-		routers[app.Metadata.Name+"-internal"] = r
+		routers[app.Metadata.Name+"-private"] = r
 	}
 
-	// External router — ALWAYS uses Let's Encrypt and may have different middleware
-	if domains.External != "" &&
-		(app.Spec.Capabilities.Exposure == "external" || app.Spec.Capabilities.Exposure == "both") {
+	// Public router — ALWAYS uses Let's Encrypt and may have different middleware
+	if domains.Public != "" {
 
-		routers[app.Metadata.Name+"-external"] = router{
-			Rule:        buildHostRule(domains.External),
+		routers[app.Metadata.Name+"-public"] = router{
+			Rule:        buildHostRule(domains.Public),
 			Service:     svcName,
 			Entrypoints: []string{"websecure"},
 			Middlewares: middlewares,

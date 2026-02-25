@@ -248,7 +248,7 @@ Examples:
 		}
 
 		// ── 3c. Traefik public routers (managed file) ────────────────────────
-		if app.Spec.Type == "coolify-app" && app.Spec.Domains.External != "" {
+		if app.Spec.Type == "coolify-app" && app.NormalizedDomains().Public != "" {
 			step("Traefik", "Reconciling managed public app routers")
 			traefikClient := traefik.NewClient(resolveTraefikConfigDir(manifestsDir))
 			if err := traefikClient.SyncManagedPublicRouters(app); err != nil {
@@ -264,7 +264,11 @@ Examples:
 		}
 
 		// ── 5. Wait for healthy ────────────────────────────────────────────────
-		step("Health", fmt.Sprintf("Waiting for %s to become healthy", app.Spec.Domains.Internal))
+		domainHint := app.GetDomains().Private
+		if domainHint == "" {
+			domainHint = app.GetDomains().Public
+		}
+		step("Health", fmt.Sprintf("Waiting for %s to become healthy", domainHint))
 		if err := coolifyClient.WaitForHealthy(ctx, appID, 5*time.Minute); err != nil {
 			return fmt.Errorf("health check failed: %w", err)
 		}
@@ -286,7 +290,7 @@ Examples:
 				repo := github.RepoSlug(app.Spec.Repository.URL)
 
 				// GetAppsByName returns ALL Coolify resources with this name
-				// (typically 2: development-internal + production-internal)
+				// (typically 2: development + production)
 				allResources, err := coolifyClient.GetAppsByName(ctx, appName)
 				if err != nil {
 					fmt.Printf("  %s [Webhooks] could not list Coolify resources: %v\n",
@@ -322,11 +326,11 @@ Examples:
 		domains := app.GetDomains()
 
 		fmt.Printf("\n%s %s deployed successfully!\n", color.GreenString("✓"), color.New(color.Bold).Sprint(appName))
-		if domains.Internal != "" {
-			fmt.Printf("  Internal: https://%s\n", domains.Internal)
+		if domains.Private != "" {
+			fmt.Printf("  Private: https://%s\n", domains.Private)
 		}
-		if domains.External != "" {
-			fmt.Printf("  External: https://%s\n", domains.External)
+		if domains.Public != "" {
+			fmt.Printf("  Public: https://%s\n", domains.Public)
 		}
 
 		// For non-Coolify apps (e.g. systemd-service, internet-agent, vpn-agent)
@@ -335,11 +339,11 @@ Examples:
 		if app.Spec.Capabilities.DNS && app.Spec.Type != "coolify-app" {
 			fmt.Printf("\n%s DNS rewrite required (AdGuard Home → Filters → DNS rewrites):\n",
 				color.YellowString("⚠"))
-			if domains.Internal != "" {
-				fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.Internal))
+			if domains.Private != "" {
+				fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.Private))
 			}
-			if domains.External != "" {
-				fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.External))
+			if domains.Public != "" {
+				fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.Public))
 			}
 		}
 		return nil

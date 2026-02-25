@@ -121,7 +121,7 @@ spec:
   runtime:
     port: 3000
   domains:
-    internal: my-app.apps.mayencenouvelle.internal
+    private: my-app.apps.mayencenouvelle.internal
 ```
 
 ## Development

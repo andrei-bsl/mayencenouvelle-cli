@@ -117,9 +117,10 @@ func TestValidate(t *testing.T) {
 				Kind:       "AppConfig",
 				Metadata:   Metadata{Name: "test-app"},
 				Spec: Spec{
-					Runtime: Runtime{Port: 3000},
+					Type:         "coolify-app",
+					Runtime:      Runtime{Port: 3000},
 					Capabilities: Capabilities{Exposure: "internal"},
-					Domains: Domains{Internal: "test.internal"},
+					Domains:      Domains{Private: "test.internal"},
 				},
 			},
 			wantErr: false,
@@ -145,15 +146,16 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "exposure internal without internal domain",
+			name: "missing domains",
 			app: &AppConfig{
 				APIVersion: "mnlab/v1",
 				Kind:       "AppConfig",
 				Metadata:   Metadata{Name: "test"},
 				Spec: Spec{
-					Runtime: Runtime{Port: 3000},
+					Type:         "coolify-app",
+					Runtime:      Runtime{Port: 3000},
 					Capabilities: Capabilities{Exposure: "internal"},
-					Domains: Domains{Internal: ""},
+					Domains:      Domains{},
 				},
 			},
 			wantErr: true,
