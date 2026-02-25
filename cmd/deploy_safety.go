@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,11 +78,11 @@ func syncTraefikRuntimeFiles(localTraefikDir string) (bool, error) {
 	return true, nil
 }
 
-func verifyTraefikPublicRouters(ctx context.Context, tf *traefik.Client, app *manifest.AppConfig, base *manifest.BaseConfig) error {
+func verifyTraefikPublicRouters(ctx context.Context, tf *traefik.Client, app *manifest.AppConfig, base *manifest.BaseConfig) (bool, error) {
 	domains := app.GetDomains()
 	hosts := splitHostCSV(domains.Public)
 	if len(hosts) == 0 {
-		return nil
+		return false, nil
 	}
 
 	apiURL := strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_URL"))
@@ -89,8 +90,9 @@ func verifyTraefikPublicRouters(ctx context.Context, tf *traefik.Client, app *ma
 		apiURL = strings.TrimSpace(base.Traefik.AdminEndpoint)
 	}
 	if apiURL == "" {
-		return fmt.Errorf("MN_TRAEFIK_API_URL (or base.traefik.admin_endpoint) is required to verify public routers")
+		return false, fmt.Errorf("MN_TRAEFIK_API_URL (or base.traefik.admin_endpoint) is required to verify public routers")
 	}
+	apiURL = normalizeTraefikAPIURL(apiURL)
 
 	insecure := strings.EqualFold(strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_INSECURE")), "true")
 	missing, err := tf.MissingHostsFromAPI(ctx, apiURL, hosts, insecure)
@@ -101,14 +103,39 @@ func verifyTraefikPublicRouters(ctx context.Context, tf *traefik.Client, app *ma
 		if isNetworkUnreachable(err) {
 			fmt.Printf("  %s [Traefik] API unreachable from this machine (%s) — skipping router verification\n",
 				"\033[33m⚠\033[0m", apiURL)
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("traefik routers missing for host(s): %s", strings.Join(missing, ", "))
+		return false, fmt.Errorf("traefik routers missing for host(s): %s", strings.Join(missing, ", "))
 	}
-	return nil
+	return true, nil
+}
+
+func normalizeTraefikAPIURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	path := strings.TrimSuffix(u.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/dashboard"):
+		u.Path = strings.TrimSuffix(path, "/dashboard")
+	case strings.HasSuffix(path, "/dashboard/"):
+		u.Path = strings.TrimSuffix(path, "/dashboard/")
+	case strings.HasSuffix(path, "/dashboard.html"):
+		u.Path = strings.TrimSuffix(path, "/dashboard.html")
+	}
+	if strings.HasSuffix(strings.TrimSuffix(u.Path, "/"), "/api/http/routers") {
+		return strings.TrimRight(u.String(), "/")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/api/http/routers"
+	return strings.TrimRight(u.String(), "/")
 }
 
 // isNetworkUnreachable returns true for errors that indicate the endpoint is not

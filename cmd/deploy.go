@@ -262,10 +262,13 @@ Examples:
 			}
 
 			step("Traefik", "Verifying public routers via Traefik API")
-			if err := verifyTraefikPublicRouters(ctx, traefikClient, app, base); err != nil {
+			verified, err := verifyTraefikPublicRouters(ctx, traefikClient, app, base)
+			if err != nil {
 				return fmt.Errorf("traefik router verification: %w", err)
 			}
-			ok("Traefik", "public routers present in runtime API")
+			if verified {
+				ok("Traefik", "public routers present in runtime API")
+			}
 		}
 
 		// ── 4. Trigger Coolify deploy ─────────────────────────────────────────
