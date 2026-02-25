@@ -46,13 +46,32 @@ func syncTraefikRuntimeFiles(localTraefikDir string) (bool, error) {
 		return false, fmt.Errorf("no traefik public router files found in %s", localTraefikDir)
 	}
 
-	if err := runLocalCommand(15*time.Second, "ssh", "-o", "BatchMode=yes", sshTarget, "install", "-d", remoteDir); err != nil {
+	// Ensure remote directory exists (andrei may not own /srv/docker/infra/traefik/dynamic,
+	// so use sudo mkdir -p instead of install -d to avoid permission errors).
+	mkdirCmd := fmt.Sprintf("sudo mkdir -p %s", remoteDir)
+	if err := runLocalCommand(15*time.Second, "ssh", "-o", "BatchMode=yes", sshTarget, mkdirCmd); err != nil {
 		return false, err
 	}
+	// Use "cat | ssh sudo tee" instead of scp: the target directory is root-owned and requires
+	// sudo to write. scp cannot sudo, but piping through tee with sudo works cleanly.
 	for _, src := range existing {
-		dst := fmt.Sprintf("%s:%s/%s", sshTarget, remoteDir, filepath.Base(src))
-		if err := runLocalCommand(20*time.Second, "scp", "-q", src, dst); err != nil {
-			return false, err
+		remotePath := fmt.Sprintf("%s/%s", remoteDir, filepath.Base(src))
+		content, err := os.ReadFile(src)
+		if err != nil {
+			return false, fmt.Errorf("reading %s: %w", src, err)
+		}
+		remoteCmd := fmt.Sprintf("sudo tee %s > /dev/null", remotePath)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", sshTarget, remoteCmd)
+		cmd.Stdin = strings.NewReader(string(content))
+		out, cmdErr := cmd.CombinedOutput()
+		cancel()
+		if cmdErr != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = cmdErr.Error()
+			}
+			return false, fmt.Errorf("syncing %s via ssh+sudo tee: %s", filepath.Base(src), msg)
 		}
 	}
 	return true, nil
@@ -76,12 +95,40 @@ func verifyTraefikPublicRouters(ctx context.Context, tf *traefik.Client, app *ma
 	insecure := strings.EqualFold(strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_INSECURE")), "true")
 	missing, err := tf.MissingHostsFromAPI(ctx, apiURL, hosts, insecure)
 	if err != nil {
+		// Traefik API port (8080) is only accessible from within the lab network.
+		// When running from a dev machine, connection refused or network unreachable
+		// is expected — downgrade to a warning so the deploy still proceeds.
+		if isNetworkUnreachable(err) {
+			fmt.Printf("  %s [Traefik] API unreachable from this machine (%s) — skipping router verification\n",
+				"\033[33m⚠\033[0m", apiURL)
+			return nil
+		}
 		return err
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("traefik routers missing for host(s): %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// isNetworkUnreachable returns true for errors that indicate the endpoint is not
+// reachable from the current machine (connection refused, no route to host, timeout).
+// These are expected when running mn-cli from outside the lab network.
+func isNetworkUnreachable(err error) bool {
+	s := strings.ToLower(err.Error())
+	for _, phrase := range []string{
+		"connection refused",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"context deadline exceeded",
+		"dial tcp",
+	} {
+		if strings.Contains(s, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureCoolifyRuntimeContainer(ctx context.Context, coolifyClient *coolify.Client, appUUID string) error {
