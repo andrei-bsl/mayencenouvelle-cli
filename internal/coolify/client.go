@@ -491,32 +491,29 @@ func buildCoolifyUpdatePayload(app *manifest.AppConfig, domains string) map[stri
 //   - domains.public (comma-separated), emitted as http://
 //   - domains.private (comma-separated), emitted as http://
 //
-// Stage prefixing ("dev-") is applied to each hostname entry.
+// Stage prefixing is already handled by manifest.AppConfig.GetDomains().
 func buildFQDN(app *manifest.AppConfig) string {
 	name := app.Metadata.Name
-	isProduction := app.Spec.Repository.Branch == "main" || app.Spec.Repository.Branch == "master"
 	domains := app.GetDomains()
-
-	// Determine environment prefix
-	envPrefix := ""
-	if !isProduction {
-		envPrefix = "dev-"
-	}
 	var entries []string
 	if domains.Public != "" {
-		entries = append(entries, prefixDomainList(domains.Public, envPrefix, "http"))
+		entries = append(entries, prefixDomainList(domains.Public, "http"))
 	}
 	if domains.Private != "" {
-		entries = append(entries, prefixDomainList(domains.Private, envPrefix, "http"))
+		entries = append(entries, prefixDomainList(domains.Private, "http"))
 	}
 	if len(entries) > 0 {
 		return strings.Join(entries, ",")
 	}
 	// Defensive fallback for incomplete manifests.
-	return prefixDomainList(fmt.Sprintf("%s.apps.mayencenouvelle.internal", name), envPrefix, "http")
+	stagePrefix := ""
+	if app.GetEnvironmentStage() == "development" {
+		stagePrefix = "dev-"
+	}
+	return prefixDomainList(fmt.Sprintf("%s%s.apps.mayencenouvelle.internal", stagePrefix, name), "http")
 }
 
-func prefixDomainList(raw, envPrefix, scheme string) string {
+func prefixDomainList(raw, scheme string) string {
 	parts := strings.Split(raw, ",")
 	entries := make([]string, 0, len(parts))
 	for _, p := range parts {
@@ -524,7 +521,7 @@ func prefixDomainList(raw, envPrefix, scheme string) string {
 		if p == "" {
 			continue
 		}
-		entries = append(entries, fmt.Sprintf("%s://%s%s", scheme, envPrefix, p))
+		entries = append(entries, fmt.Sprintf("%s://%s", scheme, p))
 	}
 	return strings.Join(entries, ",")
 }
