@@ -33,9 +33,14 @@ type CoolifyBase struct {
 	Endpoint        string `yaml:"endpoint"`
 	ServerUUID      string `yaml:"server_uuid"`
 	DestinationUUID string `yaml:"destination_uuid"`
-	// PrivateKeyUUID is the Coolify SSH deploy key UUID (from Keys & Certificates).
-	// Used when creating applications from private GitHub repositories.
-	// Corresponds to the 'github-deploy' key registered in Coolify.
+	// GitHubAppUUID is the Coolify GitHub App source UUID.
+	// Using a GitHub App grants scoped access to all org repos via a single
+	// installation — no per-repo SSH deploy keys needed.
+	// Register once in Coolify → Sources → + Add.
+	GitHubAppUUID   string `yaml:"github_app_uuid"`
+	// PrivateKeyUUID is the legacy Coolify SSH deploy key UUID.
+	// Deprecated: use github_app_uuid instead. Kept as fallback for repos
+	// not covered by the GitHub App installation.
 	PrivateKeyUUID  string `yaml:"private_key_uuid"`
 }
 
@@ -150,10 +155,9 @@ type Capabilities struct {
 type Repository struct {
 	URL            string `yaml:"url"`
 	Branch         string `yaml:"branch"`
-	// PrivateKeyUUID overrides the global Coolify deploy key for this app.
-	// Required for private repos when the global key is already used elsewhere
-	// (GitHub deploy keys must be unique per repository).
-	// Find UUIDs in Coolify → Keys & Certificates, or via mn-cli.
+	// PrivateKeyUUID is a legacy per-repo SSH deploy key override.
+	// Deprecated: GitHub App (base.yaml github_app_uuid) replaces per-repo keys.
+	// Kept only for backward compatibility with existing Coolify resources.
 	PrivateKeyUUID string `yaml:"private_key_uuid,omitempty"`
 }
 

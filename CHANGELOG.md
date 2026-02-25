@@ -8,6 +8,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased] — develop branch
 
 ### Added
+- Automatic Traefik public-router reconciliation during `deploy` for apps with
+  `domains.external`:
+  - Writes/updates `coolify-apps-public-managed.yml` in Traefik dynamic config dir
+  - Creates one explicit `Host(...)` router per external hostname (stage-aware, e.g. `dev-*`)
+  - Preserves manually maintained Traefik files (no in-place rewrite)
+  - `undeploy --delete` removes the managed router entries for the targeted app/stage
 - Private repository support: `EnsureApp` now routes to `POST /api/v1/applications/private-deploy-key`
   when `private_key_uuid` is set (app-level or base), instead of always using `/applications/public`.
   The `/public` endpoint silently ignores `private_key_uuid`, leaving `private_key_id: None` and

@@ -12,6 +12,7 @@ import (
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/traefik"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/vault"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -246,6 +247,16 @@ Examples:
 			ok("Coolify", fmt.Sprintf("%d env var(s) synced", len(app.Spec.Environment)))
 		}
 
+		// ── 3c. Traefik public routers (managed file) ────────────────────────
+		if app.Spec.Type == "coolify-app" && app.Spec.Domains.External != "" {
+			step("Traefik", "Reconciling managed public app routers")
+			traefikClient := traefik.NewClient(resolveTraefikConfigDir(manifestsDir))
+			if err := traefikClient.SyncManagedPublicRouters(app); err != nil {
+				return fmt.Errorf("traefik managed routers: %w", err)
+			}
+			ok("Traefik", "managed public routers synced")
+		}
+
 		// ── 4. Trigger Coolify deploy ─────────────────────────────────────────
 		step("Coolify", "Triggering deployment")
 		if err := coolifyClient.Deploy(ctx, appID); err != nil {
@@ -254,7 +265,7 @@ Examples:
 
 		// ── 5. Wait for healthy ────────────────────────────────────────────────
 		step("Health", fmt.Sprintf("Waiting for %s to become healthy", app.Spec.Domains.Internal))
-		if err := coolifyClient.WaitForHealthy(ctx, appID, 2*time.Minute); err != nil {
+		if err := coolifyClient.WaitForHealthy(ctx, appID, 5*time.Minute); err != nil {
 			return fmt.Errorf("health check failed: %w", err)
 		}
 		ok("Health", "service is healthy")

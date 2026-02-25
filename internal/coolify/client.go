@@ -40,13 +40,13 @@ func NewClient(endpoint, token string) *Client {
 
 // App represents a Coolify service/application.
 type App struct {
-	UUID                      string    `json:"uuid"` // Coolify returns uuid, not id
-	ID                        string    `json:"id"`
-	Name                      string    `json:"name"`
-	Status                    string    `json:"status"` // running | stopped | building | error
-	FQDN                      string    `json:"fqdn"`   // Set manually in Coolify UI; API cannot set this
-	Repository                string    `json:"repository"`
-	Branch                    string    `json:"git_branch"`
+	UUID       string `json:"uuid"` // Coolify returns uuid, not id
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"` // running | stopped | building | error
+	FQDN       string `json:"fqdn"`   // Set manually in Coolify UI; API cannot set this
+	Repository string `json:"repository"`
+	Branch     string `json:"git_branch"`
 	// ManualWebhookSecretGithub is Coolify's auto-generated token for this resource.
 	// It serves dual purpose:
 	//   1. URL token  → {coolify_url}/webhooks/source/github/events/manual?token={value}
@@ -172,20 +172,24 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 	}
 
 	if existing == nil {
-		// Create new service. Endpoint depends on whether a deploy key is configured:
-		//   - Private repos → /api/v1/applications/private-deploy-key (requires private_key_uuid)
-		//   - Public repos  → /api/v1/applications/public
-		// The /public endpoint silently ignores private_key_uuid and private_key_id stays
-		// None, causing SSH auth failure at clone time.
+		// Create new service. Endpoint selection priority:
+		//   1. GitHub App  → /api/v1/applications/private-github-app (requires github_app_uuid)
+		//   2. Deploy key  → /api/v1/applications/private-deploy-key (requires private_key_uuid)
+		//   3. Public repo → /api/v1/applications/public
+		// GitHub App is preferred: one installation covers all org repos — no per-repo keys.
 		// Response format: {"uuid": "...", "domains": "..."}
 		payload := buildCoolifyCreatePayload(app, base)
-		privateKeyUUID := app.Spec.Repository.PrivateKeyUUID
-		if privateKeyUUID == "" {
-			privateKeyUUID = base.Coolify.PrivateKeyUUID
-		}
 		createEndpoint := "/api/v1/applications/public"
-		if privateKeyUUID != "" {
-			createEndpoint = "/api/v1/applications/private-deploy-key"
+		if base.Coolify.GitHubAppUUID != "" {
+			createEndpoint = "/api/v1/applications/private-github-app"
+		} else {
+			privateKeyUUID := app.Spec.Repository.PrivateKeyUUID
+			if privateKeyUUID == "" {
+				privateKeyUUID = base.Coolify.PrivateKeyUUID
+			}
+			if privateKeyUUID != "" {
+				createEndpoint = "/api/v1/applications/private-deploy-key"
+			}
 		}
 		var resp struct {
 			UUID string `json:"uuid"`
@@ -270,13 +274,14 @@ func (c *Client) UpdateEnvVars(ctx context.Context, appUUID string, desired map[
 			// Delete stale entry, then create fresh (avoids UUID staleness issues)
 			_ = c.http.Delete(ctx, basePath+"/"+e.UUID) // best-effort delete
 		}
-		// Create env var (runtime-only: avoids build-time sourcing issues
-		// where hyphens in keys or NODE_ENV=production break the build).
+		// Frontend variables (VITE_*, NEXT_PUBLIC_*) must be available at
+		// build-time for static bundles. Keep all others runtime-only by default.
+		isBuildTime := strings.HasPrefix(key, "VITE_") || strings.HasPrefix(key, "NEXT_PUBLIC_")
 		payload := map[string]interface{}{
 			"key":          key,
 			"value":        value,
 			"is_preview":   false,
-			"is_buildtime": false,
+			"is_buildtime": isBuildTime,
 		}
 		if err := c.http.Post(ctx, basePath, payload, nil); err != nil {
 			return fmt.Errorf("create env %s: %w", key, err)
@@ -332,7 +337,8 @@ func (c *Client) Delete(ctx context.Context, serviceUUID string) error {
 }
 
 // WaitForHealthy polls the service status until it is running or timeout.
-// Coolify returns statuses like "running", "running:healthy", "running:unhealthy".
+// Coolify may return "running", "running:healthy", or "running:unknown"
+// depending on whether health checks are configured/parsed.
 func (c *Client) WaitForHealthy(ctx context.Context, serviceID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -340,8 +346,8 @@ func (c *Client) WaitForHealthy(ctx context.Context, serviceID string, timeout t
 		if err := c.http.Get(ctx, "/api/v1/applications/"+serviceID, &app); err != nil {
 			return err
 		}
-		// Accept "running" or "running:healthy" — reject "running:unhealthy"
-		if app.Status == "running:healthy" || app.Status == "running" {
+		// Accept running states; reject explicit unhealthy.
+		if app.Status == "running:healthy" || app.Status == "running" || app.Status == "running:unknown" {
 			return nil
 		}
 		select {
@@ -391,9 +397,10 @@ func httpsToSSH(rawURL string) string {
 }
 
 // buildCoolifyCreatePayload builds the JSON payload for creating a Coolify application.
-// Used by both /api/v1/applications/public (public repos) and
-// /api/v1/applications/private-deploy-key (private repos with SSH deploy key).
-// When private_key_uuid is set, the SSH URL is used for git_repository.
+// Supports three modes:
+//   - GitHub App  → HTTPS URL + github_app_uuid (preferred — one installation covers all repos)
+//   - Deploy key  → SSH URL + private_key_uuid (legacy — per-repo keys)
+//   - Public repo → HTTPS URL, no auth fields
 func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfig) map[string]interface{} {
 	// Determine build pack: dockerfile if specified, otherwise nixpacks
 	buildPack := "nixpacks"
@@ -404,18 +411,7 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 	// Get environment name based on branch + exposure (development-internal, development, etc.)
 	envName := app.GetEnvironmentStage()
 
-	// Resolve the deploy key: app-level overrides base config (per-repo keys).
-	// GitHub deploy keys must be unique per repo, so each private repo needs its own key.
-	privateKeyUUID := app.Spec.Repository.PrivateKeyUUID
-	if privateKeyUUID == "" {
-		privateKeyUUID = base.Coolify.PrivateKeyUUID
-	}
-
-	// Use SSH URL when a private key is configured; HTTPS for public repos.
 	repoURL := app.Spec.Repository.URL
-	if privateKeyUUID != "" {
-		repoURL = httpsToSSH(repoURL)
-	}
 
 	payload := map[string]interface{}{
 		"project_uuid":        base.Coolify.ProjectUUID,
@@ -432,9 +428,21 @@ func buildCoolifyCreatePayload(app *manifest.AppConfig, base *manifest.BaseConfi
 		// It is set immediately after via a separate PATCH call (see EnsureApp).
 	}
 
-	// Attach SSH deploy key for private repositories.
-	if privateKeyUUID != "" {
-		payload["private_key_uuid"] = privateKeyUUID
+	// Priority: GitHub App > legacy deploy key > public
+	if base.Coolify.GitHubAppUUID != "" {
+		// GitHub App: Coolify clones via the app installation token (HTTPS).
+		// The repo URL stays as HTTPS — no SSH conversion needed.
+		payload["github_app_uuid"] = base.Coolify.GitHubAppUUID
+	} else {
+		// Legacy: resolve per-repo or global SSH deploy key.
+		privateKeyUUID := app.Spec.Repository.PrivateKeyUUID
+		if privateKeyUUID == "" {
+			privateKeyUUID = base.Coolify.PrivateKeyUUID
+		}
+		if privateKeyUUID != "" {
+			payload["git_repository"] = httpsToSSH(repoURL)
+			payload["private_key_uuid"] = privateKeyUUID
+		}
 	}
 
 	return payload
@@ -485,13 +493,13 @@ func buildCoolifyUpdatePayload(app *manifest.AppConfig, domains string) map[stri
 	}
 }
 
-// buildFQDN constructs the fully qualified domain name for the app.
-// Format for internal apps:
-//   - development: http://dev-{app}.apps.mayencenouvelle.internal,http://dev-{app}.internal.apps.mayencenouvelle.com
-//   - production: http://{app}.apps.mayencenouvelle.internal,http://{app}.internal.apps.mayencenouvelle.com
-// Format for external apps:
-//   - development: https://dev-{app}.apps.mayencenouvelle.com
-//   - production: https://{app}.apps.mayencenouvelle.com
+// buildFQDN constructs the fully qualified domain list for the app.
+// Domain mapping:
+//   - exposure=internal: domains.internal (comma-separated), emitted as http://
+//   - exposure=external: domains.external (comma-separated), emitted as http://
+//   - exposure=both: domains.external as http:// + domains.internal as http://
+//
+// Stage prefixing ("dev-") is applied to each hostname entry.
 func buildFQDN(app *manifest.AppConfig) string {
 	name := app.Metadata.Name
 	isProduction := app.Spec.Repository.Branch == "main" || app.Spec.Repository.Branch == "master"
@@ -517,15 +525,7 @@ func buildFQDN(app *manifest.AppConfig) string {
 		if rawInternal == "" {
 			rawInternal = fmt.Sprintf("%s.apps.mayencenouvelle.internal", name)
 		}
-		parts := strings.Split(rawInternal, ",")
-		var entries []string
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				entries = append(entries, fmt.Sprintf("http://%s%s", envPrefix, p))
-			}
-		}
-		return strings.Join(entries, ",")
+		return prefixDomainList(rawInternal, envPrefix, "http")
 	}
 
 	// ── External (public) domain ─────────────────────────────────────────────────
@@ -533,15 +533,32 @@ func buildFQDN(app *manifest.AppConfig) string {
 	if externalDomain == "" {
 		externalDomain = fmt.Sprintf("%s.apps.mayencenouvelle.com", name)
 	}
-	externalFQDN := fmt.Sprintf("https://%s%s", envPrefix, externalDomain)
+	// IMPORTANT: keep Coolify domains on http:// for central-Traefik forwarding.
+	// Central Traefik terminates TLS and forwards plain HTTP to coolify-proxy:80.
+	// Using https:// here makes Coolify emit redirect-to-https routers and causes
+	// infinite 307 loops when requests already arrive via HTTPS at the edge.
+	externalFQDN := prefixDomainList(externalDomain, envPrefix, "http")
 
 	// ── Both-zone apps: also include the internal domain ─────────────────────────
 	// Use http:// for the internal entry so Coolify→Traefik forwarding works
 	// (same convention as pure internal apps).
 	if isBoth && app.Spec.Domains.Internal != "" {
-		internalFQDN := fmt.Sprintf("http://%s%s", envPrefix, app.Spec.Domains.Internal)
+		internalFQDN := prefixDomainList(app.Spec.Domains.Internal, envPrefix, "http")
 		return fmt.Sprintf("%s,%s", externalFQDN, internalFQDN)
 	}
 
 	return externalFQDN
+}
+
+func prefixDomainList(raw, envPrefix, scheme string) string {
+	parts := strings.Split(raw, ",")
+	entries := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		entries = append(entries, fmt.Sprintf("%s://%s%s", scheme, envPrefix, p))
+	}
+	return strings.Join(entries, ",")
 }

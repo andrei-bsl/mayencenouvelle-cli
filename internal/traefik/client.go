@@ -12,16 +12,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
+	"gopkg.in/yaml.v3"
 )
 
 // Client manages Traefik dynamic config file generation.
 type Client struct {
 	configDir string // Path Traefik's file provider watches (e.g. /etc/traefik/dynamic)
 }
+
+var invalidRouterChars = regexp.MustCompile(`[^a-zA-Z0-9-]+`)
 
 // NewClient creates a Traefik client.
 //
@@ -138,6 +142,83 @@ func (c *Client) PlanRoutes(app *manifest.AppConfig) ([]PlanAction, error) {
 	return actions, nil
 }
 
+// SyncManagedPublicRouters upserts public-domain routers for a Coolify app into
+// a dedicated generated file (coolify-apps-public-managed.yml).
+//
+// This keeps manual config files untouched while making deploy idempotent.
+func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
+	if c.configDir == "" {
+		return fmt.Errorf("traefik config dir is empty")
+	}
+	domains := app.GetDomains()
+	if domains.External == "" {
+		return nil // nothing to manage
+	}
+
+	cfg, err := c.loadManagedPublicConfig()
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if cfg.HTTP.Routers == nil {
+		cfg.HTTP.Routers = make(map[string]router)
+	}
+
+	prefix := managedRouterPrefix(app)
+	for key := range cfg.HTTP.Routers {
+		if key == prefix+"-public" || strings.HasPrefix(key, prefix+"-public-") {
+			delete(cfg.HTTP.Routers, key)
+		}
+	}
+
+	hosts := splitDomains(domains.External)
+	for i, host := range hosts {
+		name := prefix + "-public"
+		if i > 0 {
+			name = fmt.Sprintf("%s-public-%d", prefix, i+1)
+		}
+		cfg.HTTP.Routers[name] = router{
+			Rule:        buildHostRule(host),
+			Service:     "coolify-traefik-svc@file",
+			Entrypoints: []string{"websecure"},
+			TLS:         &tlsCfg{CertResolver: "letsencrypt"},
+		}
+	}
+
+	return c.writeManagedPublicConfig(cfg)
+}
+
+// RemoveManagedPublicRouters deletes all managed public routers for an app+stage.
+func (c *Client) RemoveManagedPublicRouters(app *manifest.AppConfig) error {
+	if c.configDir == "" {
+		return fmt.Errorf("traefik config dir is empty")
+	}
+	cfg, err := c.loadManagedPublicConfig()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if cfg.HTTP.Routers == nil {
+		return nil
+	}
+
+	prefix := managedRouterPrefix(app)
+	changed := false
+	for key := range cfg.HTTP.Routers {
+		if key == prefix+"-public" || strings.HasPrefix(key, prefix+"-public-") {
+			delete(cfg.HTTP.Routers, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return c.writeManagedPublicConfig(cfg)
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 // buildHostRule converts a comma-separated list of hostnames into a valid
@@ -153,6 +234,94 @@ func buildHostRule(domains string) string {
 		}
 	}
 	return strings.Join(rules, " || ")
+}
+
+func splitDomains(domains string) []string {
+	parts := strings.Split(domains, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func managedRouterPrefix(app *manifest.AppConfig) string {
+	name := app.Metadata.Name
+	stage := app.GetEnvironmentStage()
+	if stage == "development" || stage == "development-internal" {
+		name = "dev-" + name
+	}
+	return sanitizeRouterName(name)
+}
+
+func sanitizeRouterName(name string) string {
+	name = invalidRouterChars.ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-")
+	if name == "" {
+		return "app"
+	}
+	return name
+}
+
+func (c *Client) managedPublicPath() string {
+	return filepath.Join(c.configDir, "coolify-apps-public-managed.yml")
+}
+
+func (c *Client) loadManagedPublicConfig() (dynamicConfig, error) {
+	path := c.managedPublicPath()
+	var cfg dynamicConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parsing managed traefik config %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func (c *Client) writeManagedPublicConfig(cfg dynamicConfig) error {
+	path := c.managedPublicPath()
+	if len(cfg.HTTP.Routers) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing managed traefik file %s: %w", path, err)
+		}
+		return nil
+	}
+	if cfg.HTTP.Routers == nil {
+		cfg.HTTP.Routers = make(map[string]router)
+	}
+	keys := make([]string, 0, len(cfg.HTTP.Routers))
+	for k := range cfg.HTTP.Routers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	ordered := make(map[string]router, len(keys))
+	for _, k := range keys {
+		ordered[k] = cfg.HTTP.Routers[k]
+	}
+	cfg.HTTP.Routers = ordered
+	cfg.HTTP.Services = nil
+	cfg.HTTP.Middlewares = nil
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshaling managed traefik config: %w", err)
+	}
+	if err := os.MkdirAll(c.configDir, 0755); err != nil {
+		return fmt.Errorf("ensuring traefik config dir %s: %w", c.configDir, err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("writing managed traefik temp file %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("renaming managed traefik file %s: %w", path, err)
+	}
+	return nil
 }
 
 func (c *Client) buildConfig(app *manifest.AppConfig) dynamicConfig {

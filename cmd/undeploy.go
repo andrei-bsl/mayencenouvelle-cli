@@ -10,6 +10,7 @@ import (
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/traefik"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -119,6 +120,16 @@ Examples:
 				return fmt.Errorf("coolify delete: %w", err)
 			}
 			ok("Coolify", fmt.Sprintf("%s deleted from Coolify", appName))
+
+			// Keep managed Traefik public router file in sync with app lifecycle.
+			if app.Spec.Type == "coolify-app" && app.Spec.Domains.External != "" {
+				step("Traefik", "Removing managed public app routers")
+				traefikClient := traefik.NewClient(resolveTraefikConfigDir(manifestsDir))
+				if err := traefikClient.RemoveManagedPublicRouters(app); err != nil {
+					return fmt.Errorf("traefik managed routers cleanup: %w", err)
+				}
+				ok("Traefik", "managed public routers removed")
+			}
 
 			// Remove GitHub webhooks (after Coolify delete — order doesn't matter for GitHub)
 			if len(webhookURLs) > 0 {
