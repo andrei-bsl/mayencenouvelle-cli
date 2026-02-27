@@ -102,6 +102,7 @@ mayence plan nas-app
 
 # Deploy
 mayence deploy nas-app              # single app: 6-step deploy (validate → auth → infra → routes → trigger → health)
+mayence redeploy nas-app            # force a fresh deploy of an existing app resource
 mayence apply-manifest              # all apps in dependency order
 
 # Secrets
@@ -117,6 +118,11 @@ For `coolify-app` manifests with `domains.public`, deploy also performs:
 - Coolify runtime self-heal restart if API status is running but the container is missing on runtime host.
 - Public domain readiness probes (DNS, TLS handshake, HTTPS status); strict mode is optional.
 - Single source-of-truth enforcement for public app routers (`coolify-apps-public-managed.yml`).
+
+Deploy and redeploy also refresh same-stage dependent apps when they consume
+Vault values exported by the app being deployed (for example `internal-api`
+consuming `${vault:mn/data/apps/vpn-app#authentik_client_id}`).
+This avoids manual follow-up redeploys when OIDC client IDs or related values change.
 
 ## Manifest Schema
 

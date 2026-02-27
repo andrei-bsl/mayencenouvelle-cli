@@ -106,29 +106,45 @@ func verifyTraefikPublicRouters(ctx context.Context, tf *traefik.Client, app *ma
 	apiURL = normalizeTraefikAPIURL(apiURL)
 
 	insecure := strings.EqualFold(strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_INSECURE")), "true")
-	missing, err := tf.MissingHostsFromAPI(ctx, apiURL, hosts, insecure)
-	if err != nil {
-		// Common homelab case: self-signed internal cert not trusted by local OS trust store.
-		// Retry once with TLS verify disabled so deploy does not fail on local trust issues.
-		if !insecure && isCertAuthorityError(err) {
-			fmt.Printf("  %s [Traefik] certificate not trusted locally for %s — retrying with insecure TLS\n",
-				"\033[33m⚠\033[0m", apiURL)
-			missing, err = tf.MissingHostsFromAPI(ctx, apiURL, hosts, true)
+	var lastMissing []string
+	var lastErr error
+	for attempt := 1; attempt <= 6; attempt++ {
+		missing, err := tf.MissingHostsFromAPI(ctx, apiURL, hosts, insecure)
+		if err != nil {
+			// Common homelab case: self-signed internal cert not trusted by local OS trust store.
+			// Retry once with TLS verify disabled so deploy does not fail on local trust issues.
+			if !insecure && isCertAuthorityError(err) {
+				fmt.Printf("  %s [Traefik] certificate not trusted locally for %s — retrying with insecure TLS\n",
+					"\033[33m⚠\033[0m", apiURL)
+				insecure = true
+				missing, err = tf.MissingHostsFromAPI(ctx, apiURL, hosts, true)
+			}
+			if err != nil {
+				// Traefik API port (8080) is only accessible from within the lab network.
+				// When running from a dev machine, connection refused or network unreachable
+				// is expected — downgrade to a warning so the deploy still proceeds.
+				if isNetworkUnreachable(err) {
+					fmt.Printf("  %s [Traefik] API unreachable from this machine (%s) — skipping router verification\n",
+						"\033[33m⚠\033[0m", apiURL)
+					return false, nil
+				}
+				lastErr = err
+			}
+		} else if len(missing) == 0 {
+			return true, nil
+		} else {
+			lastMissing = missing
+		}
+
+		if attempt < 6 {
+			time.Sleep(2 * time.Second)
 		}
 	}
-	if err != nil {
-		// Traefik API port (8080) is only accessible from within the lab network.
-		// When running from a dev machine, connection refused or network unreachable
-		// is expected — downgrade to a warning so the deploy still proceeds.
-		if isNetworkUnreachable(err) {
-			fmt.Printf("  %s [Traefik] API unreachable from this machine (%s) — skipping router verification\n",
-				"\033[33m⚠\033[0m", apiURL)
-			return false, nil
-		}
-		return false, err
+	if lastErr != nil {
+		return false, lastErr
 	}
-	if len(missing) > 0 {
-		return false, fmt.Errorf("traefik routers missing for host(s): %s", strings.Join(missing, ", "))
+	if len(lastMissing) > 0 {
+		return false, fmt.Errorf("traefik routers missing for host(s): %s", strings.Join(lastMissing, ", "))
 	}
 	return true, nil
 }

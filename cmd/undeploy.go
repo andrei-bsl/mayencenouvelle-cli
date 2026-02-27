@@ -72,17 +72,25 @@ Examples:
 		}
 
 		if deleteApp {
-			// Collect webhook URLs from ALL Coolify resources BEFORE deleting,
-			// so we can clean up GitHub webhooks after the Coolify resource is gone.
-			var webhookURLs []string
-			if app.Spec.Capabilities.Webhooks {
-				if allResources, err := coolifyClient.GetAppsByName(ctx, appName); err == nil {
-					for _, r := range allResources {
-						if r.ManualWebhookSecretGithub != "" {
-							webhookURLs = append(webhookURLs, coolifyClient.WebhookURL(r.ManualWebhookSecretGithub))
-						}
-					}
+			// Shared resources (Authentik provider/app) must only be removed when no
+			// other Coolify stage resource remains for the same app name.
+			allResources, err := coolifyClient.GetAppsByName(ctx, appName)
+			if err != nil {
+				return fmt.Errorf("coolify: list sibling resources: %w", err)
+			}
+			remainingStageCount := 0
+			for _, r := range allResources {
+				if r.UUID != svc.UUID {
+					remainingStageCount++
 				}
+			}
+			canDeleteSharedOIDC := remainingStageCount == 0
+
+			// Webhooks are per Coolify resource/stage. Delete only the webhook bound
+			// to the targeted resource's manual webhook token.
+			var webhookURLs []string
+			if app.Spec.Capabilities.Webhooks && svc.ManualWebhookSecretGithub != "" {
+				webhookURLs = append(webhookURLs, coolifyClient.WebhookURL(svc.ManualWebhookSecretGithub))
 			}
 
 			fmt.Printf("%s This will %s %s from Coolify (uuid: %s).\n",
@@ -91,9 +99,11 @@ Examples:
 				color.New(color.Bold).Sprint(appName),
 				svc.UUID,
 			)
-			if app.Spec.Capabilities.Auth == "oidc" {
+			if app.Spec.Capabilities.Auth == "oidc" && canDeleteSharedOIDC {
 				fmt.Printf("  Authentik OAuth2 provider (%s) and application (%s) will also be removed.\n",
 					app.ProviderName(), app.AppSlug())
+			} else if app.Spec.Capabilities.Auth == "oidc" {
+				fmt.Printf("  Authentik OAuth2 provider/application will be preserved because another stage resource still exists.\n")
 			}
 			if len(webhookURLs) > 0 {
 				fmt.Printf("  %d GitHub webhook(s) will also be removed from %s.\n",
@@ -103,7 +113,7 @@ Examples:
 			time.Sleep(5 * time.Second)
 			fmt.Println()
 
-			if app.Spec.Capabilities.Auth == "oidc" {
+			if app.Spec.Capabilities.Auth == "oidc" && canDeleteSharedOIDC {
 				step("Authentik", fmt.Sprintf("Removing provider %s and application %s", app.ProviderName(), app.AppSlug()))
 				authentikClient := authentik.NewClient(
 					viper.GetString("AUTHENTIK_URL"),
@@ -113,6 +123,8 @@ Examples:
 					return fmt.Errorf("authentik delete: %w", err)
 				}
 				ok("Authentik", "OAuth2 provider and application removed")
+			} else if app.Spec.Capabilities.Auth == "oidc" {
+				fmt.Printf("  %s [Authentik] shared provider/application preserved (another stage remains)\n", color.YellowString("⚠"))
 			}
 
 			step("Coolify", fmt.Sprintf("Deleting %s", appName))

@@ -211,29 +211,42 @@ func (c *Client) RebuildManagedPublicRouters(apps []*manifest.AppConfig) error {
 		if app == nil || !app.Spec.Enabled || app.Spec.Type != "coolify-app" {
 			continue
 		}
-		domains := app.GetDomains()
-		if domains.Public == "" {
-			continue
-		}
-		prefix := managedRouterPrefix(app)
-		hosts := splitDomains(domains.Public)
-		writeIndex := 0
-		for _, host := range hosts {
-			writeIndex++
-			name := prefix + "-public"
-			if writeIndex > 1 {
-				name = fmt.Sprintf("%s-public-%d", prefix, writeIndex)
+		for _, variant := range publicRouterStageVariants(app) {
+			domains := variant.GetDomains()
+			if domains.Public == "" {
+				continue
 			}
-			cfg.HTTP.Routers[name] = router{
-				Rule:        buildHostRule(host),
-				Service:     "coolify-traefik-svc@file",
-				Entrypoints: []string{"websecure"},
-				TLS:         &tlsCfg{CertResolver: "letsencrypt"},
+			prefix := managedRouterPrefix(variant)
+			hosts := splitDomains(domains.Public)
+			writeIndex := 0
+			for _, host := range hosts {
+				writeIndex++
+				name := prefix + "-public"
+				if writeIndex > 1 {
+					name = fmt.Sprintf("%s-public-%d", prefix, writeIndex)
+				}
+				cfg.HTTP.Routers[name] = router{
+					Rule:        buildHostRule(host),
+					Service:     "coolify-traefik-svc@file",
+					Entrypoints: []string{"websecure"},
+					TLS:         &tlsCfg{CertResolver: "letsencrypt"},
+				}
 			}
 		}
 	}
 
 	return c.writeManagedPublicConfig(cfg)
+}
+
+func publicRouterStageVariants(app *manifest.AppConfig) []*manifest.AppConfig {
+	if app == nil {
+		return nil
+	}
+	devVariant := *app
+	devVariant.Spec.Repository.Branch = "develop"
+	prodVariant := *app
+	prodVariant.Spec.Repository.Branch = "main"
+	return []*manifest.AppConfig{&devVariant, &prodVariant}
 }
 
 // RemoveManagedPublicRouters deletes all managed public routers for an app+stage.
