@@ -149,9 +149,9 @@ func (c *Client) PlanRoutes(app *manifest.AppConfig) ([]PlanAction, error) {
 }
 
 // SyncManagedPublicRouters upserts public-domain routers for a Coolify app into
-// a dedicated generated file (coolify-apps-public-managed.yml).
+// the dedicated generated file (coolify-apps-public-managed.yml).
 //
-// This keeps manual config files untouched while making deploy idempotent.
+// This file is the single source of truth for app public routers.
 func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 	if c.configDir == "" {
 		return fmt.Errorf("traefik config dir is empty")
@@ -170,10 +170,6 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 	if cfg.HTTP.Routers == nil {
 		cfg.HTTP.Routers = make(map[string]router)
 	}
-	staticHosts, err := c.loadStaticPublicHosts()
-	if err != nil {
-		return err
-	}
 
 	prefix := managedRouterPrefix(app)
 	for key := range cfg.HTTP.Routers {
@@ -185,9 +181,6 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 	hosts := splitDomains(domains.Public)
 	writeIndex := 0
 	for _, host := range hosts {
-		if _, exists := staticHosts[host]; exists {
-			continue // Already declared in static file; avoid duplicate routers.
-		}
 		writeIndex++
 		name := prefix + "-public"
 		if writeIndex > 1 {
@@ -204,29 +197,43 @@ func (c *Client) SyncManagedPublicRouters(app *manifest.AppConfig) error {
 	return c.writeManagedPublicConfig(cfg)
 }
 
-func (c *Client) loadStaticPublicHosts() (map[string]struct{}, error) {
-	path := filepath.Join(c.configDir, "coolify-apps-public.yml")
-	hosts := make(map[string]struct{})
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return hosts, nil
+// RebuildManagedPublicRouters regenerates the full managed public router file
+// from all provided app manifests. This avoids partial state and keeps one
+// source-of-truth during migration away from static files.
+func (c *Client) RebuildManagedPublicRouters(apps []*manifest.AppConfig) error {
+	if c.configDir == "" {
+		return fmt.Errorf("traefik config dir is empty")
+	}
+	cfg := dynamicConfig{}
+	cfg.HTTP.Routers = make(map[string]router)
+
+	for _, app := range apps {
+		if app == nil || !app.Spec.Enabled || app.Spec.Type != "coolify-app" {
+			continue
 		}
-		return nil, fmt.Errorf("reading static public config %s: %w", path, err)
-	}
-	var cfg dynamicConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing static public config %s: %w", path, err)
-	}
-	for _, r := range cfg.HTTP.Routers {
-		matches := hostRuleRegex.FindAllStringSubmatch(r.Rule, -1)
-		for _, m := range matches {
-			if len(m) == 2 && m[1] != "" {
-				hosts[m[1]] = struct{}{}
+		domains := app.GetDomains()
+		if domains.Public == "" {
+			continue
+		}
+		prefix := managedRouterPrefix(app)
+		hosts := splitDomains(domains.Public)
+		writeIndex := 0
+		for _, host := range hosts {
+			writeIndex++
+			name := prefix + "-public"
+			if writeIndex > 1 {
+				name = fmt.Sprintf("%s-public-%d", prefix, writeIndex)
+			}
+			cfg.HTTP.Routers[name] = router{
+				Rule:        buildHostRule(host),
+				Service:     "coolify-traefik-svc@file",
+				Entrypoints: []string{"websecure"},
+				TLS:         &tlsCfg{CertResolver: "letsencrypt"},
 			}
 		}
 	}
-	return hosts, nil
+
+	return c.writeManagedPublicConfig(cfg)
 }
 
 // RemoveManagedPublicRouters deletes all managed public routers for an app+stage.

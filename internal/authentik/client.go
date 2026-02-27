@@ -53,6 +53,7 @@ type OAuth2Provider struct {
 	ClientID         string        `json:"client_id"`
 	ClientSecret     string        `json:"client_secret"`
 	ClientType       string        `json:"client_type"` // "confidential" | "public"
+	SigningKey       string        `json:"signing_key"`
 	RedirectURIs     []RedirectURI `json:"redirect_uris"`
 	PropertyMappings []string      `json:"property_mappings"`
 }
@@ -312,6 +313,9 @@ func (c *Client) createOAuth2Provider(
 		"invalidation_flow":  base.Authentik.InvalidationFlow,
 		"property_mappings":  propertyMappings,
 	}
+	if base.Authentik.SigningKey != "" {
+		payload["signing_key"] = base.Authentik.SigningKey
+	}
 	var provider OAuth2Provider
 	if err := c.http.Post(ctx, "/providers/oauth2/", payload, &provider); err != nil {
 		return nil, err
@@ -370,6 +374,12 @@ func buildRedirectURIs(app *manifest.AppConfig, base *manifest.BaseConfig) []Red
 	}
 	stageDomains := app.GetDomains()       // stage-aware (dev-* prefix for develop branch)
 	specDomains := app.NormalizedDomains() // canonical (no dev- prefix)
+	redirectPaths := app.Spec.Auth.RedirectPaths
+	if len(redirectPaths) == 0 {
+		// Default callback path keeps OIDC provisioning functional when
+		// authentication.redirect_paths is omitted from the manifest.
+		redirectPaths = []string{"/auth/callback"}
+	}
 
 	seen := make(map[string]struct{})
 	var uris []RedirectURI
@@ -391,7 +401,7 @@ func buildRedirectURIs(app *manifest.AppConfig, base *manifest.BaseConfig) []Red
 		}
 	}
 
-	for _, path := range app.Spec.Auth.RedirectPaths {
+	for _, path := range redirectPaths {
 		addURIs("https", stageDomains.Private, path)
 		addURIs("https", specDomains.Private, path)
 		addURIs("https", stageDomains.Public, path)
@@ -400,11 +410,14 @@ func buildRedirectURIs(app *manifest.AppConfig, base *manifest.BaseConfig) []Red
 
 	// Localhost for local dev
 	for _, port := range app.Spec.Auth.LocalhostPorts {
-		for _, path := range app.Spec.Auth.RedirectPaths {
+		for _, path := range redirectPaths {
 			addURIs("http", fmt.Sprintf("localhost:%d", port), path)
 		}
 	}
 
+	if uris == nil {
+		return []RedirectURI{}
+	}
 	return uris
 }
 
@@ -433,11 +446,17 @@ func redirectURIsEqual(a, b []RedirectURI) bool {
 // resolvePropertyMappings returns the property mapping UUIDs for the given scope names.
 // Reads UUIDs from base.yaml to avoid a round-trip to the Authentik API.
 func resolvePropertyMappings(scopes []string, base *manifest.BaseConfig) []string {
+	if len(scopes) == 0 {
+		scopes = base.Authentik.DefaultScopes
+	}
 	var pks []string
 	for _, scope := range scopes {
 		if pk, ok := base.Authentik.PropertyMappings[scope]; ok {
 			pks = append(pks, pk)
 		}
+	}
+	if pks == nil {
+		return []string{}
 	}
 	return pks
 }

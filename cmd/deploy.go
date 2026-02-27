@@ -242,13 +242,39 @@ Examples:
 
 		// ── 3c. Traefik public routers (managed file) ────────────────────────
 		if app.Spec.Type == "coolify-app" && app.NormalizedDomains().Public != "" {
-			step("Traefik", "Reconciling managed public app routers")
 			traefikDir := resolveTraefikConfigDir(manifestsDir)
-			traefikClient := traefik.NewClient(traefikDir)
-			if err := traefikClient.SyncManagedPublicRouters(app); err != nil {
-				return fmt.Errorf("traefik managed routers: %w", err)
+			step("Traefik", "Enforcing single source-of-truth for public routers")
+			if err := enforceSinglePublicRouterSource(traefikDir); err != nil {
+				return fmt.Errorf("traefik public router ownership: %w", err)
 			}
-			ok("Traefik", "managed public routers synced")
+			ok("Traefik", "single source-of-truth check passed")
+
+			traefikClient := traefik.NewClient(traefikDir)
+			if wildcardModeEnabled() {
+				step("Traefik", "Wildcard public mode enabled (skipping per-app router generation)")
+				if err := traefikClient.RebuildManagedPublicRouters(nil); err != nil {
+					return fmt.Errorf("traefik managed routers cleanup: %w", err)
+				}
+				apiURL := strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_URL"))
+				if apiURL == "" {
+					apiURL = strings.TrimSpace(base.Traefik.AdminEndpoint)
+				}
+				insecure := strings.EqualFold(strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_INSECURE")), "true")
+				if err := verifyWildcardPublicRouter(ctx, apiURL, insecure); err != nil {
+					return fmt.Errorf("traefik wildcard router verification: %w", err)
+				}
+				ok("Traefik", "wildcard public router verified")
+			} else {
+				step("Traefik", "Rebuilding managed public app routers from manifests")
+				allApps, err := loader.LoadOrdered()
+				if err != nil {
+					return fmt.Errorf("loading manifests for traefik rebuild: %w", err)
+				}
+				if err := traefikClient.RebuildManagedPublicRouters(allApps); err != nil {
+					return fmt.Errorf("traefik managed routers rebuild: %w", err)
+				}
+				ok("Traefik", "managed public routers rebuilt")
+			}
 
 			step("Traefik", "Syncing router files to runtime host")
 			synced, err := syncTraefikRuntimeFiles(traefikDir)
@@ -261,13 +287,15 @@ Examples:
 				fmt.Printf("  %s [Traefik] runtime sync skipped (set MN_TRAEFIK_RUNTIME_SSH_TARGET or MN_RUNTIME_SSH_TARGET)\n", color.YellowString("⚠"))
 			}
 
-			step("Traefik", "Verifying public routers via Traefik API")
-			verified, err := verifyTraefikPublicRouters(ctx, traefikClient, app, base)
-			if err != nil {
-				return fmt.Errorf("traefik router verification: %w", err)
-			}
-			if verified {
-				ok("Traefik", "public routers present in runtime API")
+			if !wildcardModeEnabled() {
+				step("Traefik", "Verifying public routers via Traefik API")
+				verified, err := verifyTraefikPublicRouters(ctx, traefikClient, app, base)
+				if err != nil {
+					return fmt.Errorf("traefik router verification: %w", err)
+				}
+				if verified {
+					ok("Traefik", "public routers present in runtime API")
+				}
 			}
 		}
 
@@ -290,6 +318,12 @@ Examples:
 
 		if err := ensureCoolifyRuntimeContainer(ctx, coolifyClient, appID); err != nil {
 			return fmt.Errorf("runtime container validation: %w", err)
+		}
+		if app.Spec.Type == "coolify-app" && app.GetDomains().Public != "" {
+			step("Domain", "Verifying public DNS/TLS readiness")
+			if err := verifyPublicDomainReadiness(app); err != nil {
+				return err
+			}
 		}
 
 		// ── 6. GitHub webhooks ──────────────────────────────────────────────────

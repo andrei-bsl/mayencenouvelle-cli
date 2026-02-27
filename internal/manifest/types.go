@@ -51,6 +51,7 @@ type AuthentikBase struct {
 	DefaultScopes     []string          `yaml:"default_scopes"`
 	AuthorizationFlow string            `yaml:"authorization_flow"`
 	InvalidationFlow  string            `yaml:"invalidation_flow"`
+	SigningKey        string            `yaml:"signing_key"`
 	PropertyMappings  map[string]string `yaml:"property_mappings"`
 	// InternalAltDomainSuffix is the alternate external domain suffix for internal apps.
 	// E.g. "internal.apps.mayencenouvelle.com" causes
