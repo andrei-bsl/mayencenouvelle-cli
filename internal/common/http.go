@@ -7,10 +7,13 @@ package common
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -25,13 +28,27 @@ type HTTPClient struct {
 //
 //	base:  base URL including path prefix (e.g. "https://coolify.lab/api/v1")
 //	token: Bearer token for Authorization header
+//
+// Respects COOLIFY_INSECURE env var to skip TLS verification (useful for self-signed certs in homelabs)
 func NewHTTPClient(base, token string) *HTTPClient {
-	return &HTTPClient{
-		base:  base,
-		token: token,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
+	// Check if insecure TLS is enabled
+	skipVerify := strings.ToLower(os.Getenv("COOLIFY_INSECURE")) == "true"
+	
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: skipVerify,
+	}
+	
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
 		},
+	}
+	
+	return &HTTPClient{
+		base:   base,
+		token:  token,
+		client: httpClient,
 	}
 }
 

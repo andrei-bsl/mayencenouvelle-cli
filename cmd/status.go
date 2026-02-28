@@ -51,7 +51,7 @@ Examples:
 		}
 
 		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
+			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 
@@ -72,7 +72,12 @@ Examples:
 			}
 
 			// HTTP health check
-			healthStatus := checkHealth(app.Spec.Domains.Internal, app.Spec.Runtime.HealthEndpoint)
+			domains := app.GetDomains()
+			healthDomain := domains.Private
+			if healthDomain == "" {
+				healthDomain = domains.Public
+			}
+			healthStatus := checkHealth(healthDomain, app.Spec.Runtime.HealthEndpoint)
 
 			// Route check (simplified)
 			routeStatus := color.GreenString("ok")

@@ -42,7 +42,7 @@ Examples:
 		fmt.Printf("%s rolling back %s...\n", color.YellowString("↩"), color.New(color.Bold).Sprint(appName))
 
 		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
+			viper.GetString("COOLIFY_URL"),
 			viper.GetString("COOLIFY_API_TOKEN"),
 		)
 

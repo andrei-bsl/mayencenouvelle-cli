@@ -3,131 +3,86 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/authentik"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/traefik"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/vault"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
+var deployStage string
+var redeployStage string
+
+// stageToProductionBranch returns true if the stage flag targets production.
+func isProductionStage(stage string) bool {
+	return stage == "prod" || stage == "production"
+}
+
+// applyStage overrides the manifest branch for the target stage:
+//   - dev (default): use manifest branch as-is (e.g. develop)
+//   - prod: override to "main" — Coolify production resource tracks the main branch
+//
+// Also applies environment_overrides[stage] if present, merging
+// stage-specific env vars on top of the base environment.
+func applyStage(app *manifest.AppConfig, stage string) {
+	if isProductionStage(stage) {
+		app.Spec.Repository.Branch = "main"
+		app.ApplyStageOverrides("prod")
+	} else {
+		app.ApplyStageOverrides(stage)
+	}
+}
+
 var deployCmd = &cobra.Command{
 	Use:   "deploy <app-name>",
-	Short: "Deploy a single app end-to-end (Coolify + Authentik + Traefik + DNS + webhook)",
-	Long: `Reads the app manifest and applies all required configuration:
+	Short: "Deploy a single app end-to-end (Coolify + Authentik + DNS + webhook)",
+	Long: `Reads the app manifest and applies required configuration:
 
   1. Validates the manifest
   2. Creates/updates Authentik OAuth2 provider + application (if auth: oidc)
   3. Creates/updates Coolify service with env vars (including OIDC credentials)
-  4. Generates Traefik router config (internal and/or external)
-  5. Creates/updates DNS rewrite in AdGuard Home
-  6. Configures GitHub webhook for auto-deploy on push
-  7. Triggers initial deployment in Coolify
-  8. Waits for health check to pass
+  4. Triggers initial deployment in Coolify
+  5. Waits for health check to pass
+  6. Registers GitHub webhooks (if webhooks: true) — one per Coolify resource
+     (dev + prod when both environments are deployed)
 
-All operations are idempotent — safe to run multiple times.
+Use --stage prod to deploy the production environment (branch: main).
+Default is dev (branch from manifest, e.g. develop).
 
 Examples:
-  mayence deploy nas-app
-  mayence deploy nas-app --dry-run    Preview without applying`,
+  mn-cli deploy hello-world
+  mn-cli deploy hello-world --stage prod
+  mn-cli deploy hello-world --dry-run`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		appName := args[0]
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
+		return runDeployWithDependents(ctx, args[0], deployStage, true, map[string]bool{})
+	},
+}
 
-		// ── 1. Load + validate manifest ─────────────────────────────────────
-		loader, err := manifest.NewLoader(manifestsDir)
-		if err != nil {
-			return fmt.Errorf("loading manifests: %w", err)
-		}
-		app, err := loader.LoadApp(appName)
-		if err != nil {
-			return err
-		}
-		if errs := app.Validate(); len(errs) > 0 {
-			for _, e := range errs {
-				fmt.Printf("  ✗ %s\n", e)
-			}
-			return fmt.Errorf("manifest validation failed")
-		}
+var redeployCmd = &cobra.Command{
+	Use:   "redeploy <app-name>",
+	Short: "Redeploy a single app and refresh dependent consumers",
+	Long: `Re-applies manifest configuration and triggers a fresh Coolify deployment.
 
-		if dryRun {
-			fmt.Printf("%s dry-run mode: use 'mayence plan %s' for detailed preview\n",
-				color.YellowString("⚠"), appName)
-			return nil
-		}
-
-		fmt.Printf("%s deploying %s...\n\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName))
-
-		// ── 2. Authentik OAuth2 (only for oidc apps) ─────────────────────────
-		var clientID, clientSecret string
-		if app.Spec.Capabilities.Auth == "oidc" {
-			step("Authentik", "Creating OAuth2 provider + application")
-			authentikClient := authentik.NewClient(
-				viper.GetString("AUTHENTIK_ENDPOINT"),
-				viper.GetString("AUTHENTIK_API_TOKEN"),
-			)
-			creds, err := authentikClient.EnsureOAuth2Provider(ctx, app)
-			if err != nil {
-				return fmt.Errorf("authentik: %w", err)
-			}
-			clientID = creds.ClientID
-			clientSecret = creds.ClientSecret
-			ok("Authentik", fmt.Sprintf("provider %s ready", creds.ProviderName))
-		}
-
-		// ── 3. Coolify service ────────────────────────────────────────────────
-		step("Coolify", "Creating/updating service")
-		coolifyClient := coolify.NewClient(
-			viper.GetString("COOLIFY_ENDPOINT"),
-			viper.GetString("COOLIFY_API_TOKEN"),
-		)
-		// Inject Authentik credentials into env if present
-		if clientID != "" {
-			app.Spec.Environment[app.Metadata.Name+"_AUTHENTIK_CLIENT_ID"] = clientID
-			app.Spec.Environment[app.Metadata.Name+"_AUTHENTIK_CLIENT_SECRET"] = clientSecret
-		}
-		svc, err := coolifyClient.EnsureApp(ctx, app)
-		if err != nil {
-			return fmt.Errorf("coolify: %w", err)
-		}
-		ok("Coolify", fmt.Sprintf("service %s ready (id: %s)", svc.Name, svc.ID))
-
-		// ── 4. Traefik routes ─────────────────────────────────────────────────
-		step("Traefik", "Generating router configuration")
-		traefikClient := traefik.NewClient(viper.GetString("TRAEFIK_CONFIG_DIR"))
-		if err := traefikClient.ApplyRoutes(app); err != nil {
-			return fmt.Errorf("traefik: %w", err)
-		}
-		ok("Traefik", "routes written to config dir")
-
-		// ── 5. Trigger Coolify deploy ─────────────────────────────────────────
-		step("Coolify", "Triggering deployment")
-		if err := coolifyClient.Deploy(ctx, svc.ID); err != nil {
-			return fmt.Errorf("coolify deploy: %w", err)
-		}
-
-		// ── 6. Wait for healthy ────────────────────────────────────────────────
-		step("Health", fmt.Sprintf("Waiting for %s to become healthy", app.Spec.Domains.Internal))
-		if err := coolifyClient.WaitForHealthy(ctx, svc.ID, 2*time.Minute); err != nil {
-			return fmt.Errorf("health check failed: %w", err)
-		}
-		ok("Health", "service is healthy")
-
-		// ── Done ────────────────────────────────────────────────────────────────
-		fmt.Printf("\n%s %s deployed successfully!\n", color.GreenString("✓"), color.New(color.Bold).Sprint(appName))
-		if app.Spec.Domains.Internal != "" {
-			fmt.Printf("  Internal: https://%s\n", app.Spec.Domains.Internal)
-		}
-		if app.Spec.Domains.External != "" {
-			fmt.Printf("  External: https://%s\n", app.Spec.Domains.External)
-		}
-		return nil
+This is equivalent to a full manifest-driven deploy without manually stopping
+the app first. When the app exports OIDC or other vault-backed values consumed
+by other apps, same-stage dependents are redeployed automatically.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		return runDeployWithDependents(ctx, args[0], redeployStage, true, map[string]bool{})
 	},
 }
 
@@ -150,11 +105,11 @@ Examples:
 			return err
 		}
 
-		for _, app := range apps {
-			if !app.Spec.Enabled {
-				fmt.Printf("  ⏸  %s (disabled)\n", app.Metadata.Name)
-				continue
-			}
+	for _, app := range apps {
+		if !app.Spec.Enabled {
+			fmt.Printf("  ⏸  %s (disabled)\n", app.Metadata.Name)
+			continue
+		}
 			// Delegate to deployCmd logic
 			if err := runDeploy(app.Metadata.Name); err != nil {
 				return fmt.Errorf("deploy %s: %w", app.Metadata.Name, err)
@@ -164,9 +119,411 @@ Examples:
 	},
 }
 
+func init() {
+	deployCmd.Flags().StringVar(&deployStage, "stage", "dev", "Deployment stage: dev or prod (default: dev)")
+	redeployCmd.Flags().StringVar(&redeployStage, "stage", "dev", "Deployment stage: dev or prod (default: dev)")
+	rootCmd.AddCommand(redeployCmd)
+}
+
 // runDeploy is a helper to deploy a named app (reuses deployCmd logic).
 func runDeploy(appName string) error {
-	return deployCmd.RunE(deployCmd, []string{appName})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	return runDeployWithDependents(ctx, appName, deployStage, false, map[string]bool{})
+}
+
+func runDeployWithDependents(ctx context.Context, appName, stage string, cascadeDependents bool, visited map[string]bool) error {
+	key := stage + ":" + appName
+	if visited[key] {
+		return nil
+	}
+	visited[key] = true
+
+	deployedApp, loader, err := deploySingleApp(ctx, appName, stage)
+	if err != nil {
+		return err
+	}
+	if !cascadeDependents {
+		return nil
+	}
+
+	dependents, err := findVaultDependentApps(loader, deployedApp)
+	if err != nil {
+		return fmt.Errorf("finding dependent apps for %s: %w", appName, err)
+	}
+	if len(dependents) == 0 {
+		return nil
+	}
+
+	sort.Strings(dependents)
+	coolifyClient := coolify.NewClient(
+		viper.GetString("COOLIFY_URL"),
+		viper.GetString("COOLIFY_API_TOKEN"),
+	)
+
+	for _, dependentName := range dependents {
+		dependentApp, err := loader.LoadApp(dependentName)
+		if err != nil {
+			return fmt.Errorf("load dependent app %s: %w", dependentName, err)
+		}
+		applyStage(dependentApp, stage)
+		svc, err := coolifyClient.GetAppByNameAndBranch(ctx, dependentName, dependentApp.Spec.Repository.Branch)
+		if err != nil {
+			return fmt.Errorf("check dependent app %s: %w", dependentName, err)
+		}
+		if svc == nil {
+			fmt.Printf("  %s [Dependents] %s references %s vault data, but no %s-stage Coolify resource exists — skipping auto-redeploy\n",
+				color.YellowString("⚠"), dependentName, appName, stage)
+			continue
+		}
+		step("Dependents", fmt.Sprintf("Redeploying %s because it consumes %s vault data", dependentName, appName))
+		if err := runDeployWithDependents(ctx, dependentName, stage, false, visited); err != nil {
+			return fmt.Errorf("redeploy dependent %s: %w", dependentName, err)
+		}
+		ok("Dependents", fmt.Sprintf("%s refreshed", dependentName))
+	}
+
+	return nil
+}
+
+func deploySingleApp(ctx context.Context, appName, stage string) (*manifest.AppConfig, *manifest.Loader, error) {
+	loader, err := manifest.NewLoader(manifestsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading manifests: %w", err)
+	}
+	app, err := loader.LoadApp(appName)
+	if err != nil {
+		return nil, nil, err
+	}
+	base, err := loader.LoadBase()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading base config: %w", err)
+	}
+	if errs := app.Validate(); len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Printf("  ✗ %s\n", e)
+		}
+		return nil, nil, fmt.Errorf("manifest validation failed")
+	}
+
+	applyStage(app, stage)
+	stageLabel := "development"
+	if isProductionStage(stage) {
+		stageLabel = "production"
+	}
+
+	if dryRun {
+		fmt.Printf("%s dry-run mode: use 'mayence plan %s' for detailed preview\n",
+			color.YellowString("⚠"), appName)
+		return app, loader, nil
+	}
+
+	fmt.Printf("%s deploying %s [%s]...\n\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName), stageLabel)
+
+	var clientID, clientSecret string
+	authentikClient := authentik.NewClient(
+		viper.GetString("AUTHENTIK_URL"),
+		viper.GetString("AUTHENTIK_API_TOKEN"),
+	)
+	if app.Spec.Capabilities.Auth == "oidc" {
+		step("Authentik", "Reconciling OAuth2 provider + application")
+		creds, err := authentikClient.EnsureOAuth2Provider(ctx, app, base)
+		if err != nil {
+			return nil, nil, fmt.Errorf("authentik: %w", err)
+		}
+		clientID = creds.ClientID
+		clientSecret = creds.ClientSecret
+		action := "updated"
+		if creds.Created {
+			action = "created"
+		}
+		ok("Authentik", fmt.Sprintf("provider %s %s", creds.ProviderName, action))
+	} else {
+		if err := authentikClient.DeleteOIDC(ctx, appName); err != nil {
+			fmt.Printf("  %s [Authentik] cleanup skipped: %v\n", color.YellowString("⚠"), err)
+		}
+	}
+
+	vaultClient := vault.NewClient(
+		viper.GetString("BAO_ADDR"),
+		viper.GetString("BAO_TOKEN"),
+		viper.GetString("BAO_NAMESPACE"),
+	)
+	if vaultClient.Enabled() && clientID != "" {
+		authentikURL := viper.GetString("AUTHENTIK_URL")
+		slug := app.AppSlug()
+		vaultData := map[string]string{
+			"authentik_client_id":     clientID,
+			"authentik_client_secret": clientSecret,
+			"authentik_slug":          slug,
+			"authentik_url":           authentikURL,
+			"authentik_authority_url": authentikURL + "/application/o/" + slug + "/",
+			"authentik_jwks_uri":      authentikURL + "/application/o/" + slug + "/jwks/",
+			"authentik_issuer":        authentikURL + "/application/o/" + slug + "/",
+			"authentik_logout_url":    authentikURL + "/application/o/" + slug + "/end-session/",
+		}
+		step("Vault", fmt.Sprintf("Saving OIDC credentials + URLs → %s", app.VaultPath()))
+		err := vaultClient.KVWrite(ctx, app.VaultPath(), vaultData)
+		if err != nil {
+			fmt.Printf("  %s [Vault] could not save credentials: %v\n", color.YellowString("⚠"), err)
+		} else {
+			ok("Vault", fmt.Sprintf("credentials saved (%d keys) to %s", len(vaultData), app.VaultPath()))
+		}
+	} else if !vaultClient.Enabled() && clientID != "" {
+		fmt.Printf("  %s [Vault] BAO_ADDR/BAO_TOKEN not configured — skipping credential save\n",
+			color.YellowString("⚠"))
+	}
+
+	if vaultClient.Enabled() && len(app.Spec.Secrets.Inject) > 0 {
+		step("Vault", fmt.Sprintf("Resolving %d secret injection(s)", len(app.Spec.Secrets.Inject)))
+		injected := 0
+		for _, si := range app.Spec.Secrets.Inject {
+			path := si.VaultPath
+			if path == "" {
+				path = app.EffectiveVaultPath()
+			}
+			data, err := vaultClient.KVRead(ctx, path)
+			if err != nil {
+				fmt.Printf("  %s [Vault] read %s: %v\n", color.YellowString("⚠"), path, err)
+				continue
+			}
+			if data == nil {
+				fmt.Printf("  %s [Vault] %s not found — skipping %s\n",
+					color.YellowString("⚠"), path, si.Env)
+				continue
+			}
+			val, exists := data[si.VaultKey]
+			if !exists {
+				fmt.Printf("  %s [Vault] key %q not found in %s — skipping %s\n",
+					color.YellowString("⚠"), si.VaultKey, path, si.Env)
+				continue
+			}
+			if app.Spec.Environment == nil {
+				app.Spec.Environment = make(manifest.Env)
+			}
+			app.Spec.Environment[si.Env] = fmt.Sprintf("%v", val)
+			injected++
+		}
+		ok("Vault", fmt.Sprintf("%d/%d secrets injected into env", injected, len(app.Spec.Secrets.Inject)))
+	}
+
+	if vaultClient.Enabled() {
+		vaultRefCache := make(map[string]map[string]interface{})
+		for envKey, envVal := range app.Spec.Environment {
+			resolved, err := resolveVaultRefs(ctx, vaultClient, envVal, vaultRefCache)
+			if err != nil {
+				fmt.Printf("  %s [Vault] resolving %s: %v\n", color.YellowString("⚠"), envKey, err)
+				continue
+			}
+			if resolved != envVal {
+				app.Spec.Environment[envKey] = resolved
+			}
+		}
+	}
+
+	step("Coolify", "Creating/updating service")
+	coolifyClient := coolify.NewClient(
+		viper.GetString("COOLIFY_URL"),
+		viper.GetString("COOLIFY_API_TOKEN"),
+	)
+	svc, err := coolifyClient.EnsureApp(ctx, app, base)
+	if err != nil {
+		return nil, nil, fmt.Errorf("coolify: %w", err)
+	}
+	appID := svc.UUID
+	if appID == "" {
+		appID = svc.ID
+	}
+	ok("Coolify", fmt.Sprintf("service %s ready (uuid: %s)", svc.Name, appID))
+
+	if len(app.Spec.Environment) > 0 {
+		step("Coolify", fmt.Sprintf("Syncing %d environment variable(s)", len(app.Spec.Environment)))
+		if err := coolifyClient.UpdateEnvVars(ctx, appID, app.Spec.Environment); err != nil {
+			return nil, nil, fmt.Errorf("coolify env vars: %w", err)
+		}
+		ok("Coolify", fmt.Sprintf("%d env var(s) synced", len(app.Spec.Environment)))
+	}
+
+	if app.Spec.Type == "coolify-app" && app.NormalizedDomains().Public != "" {
+		traefikDir := resolveTraefikConfigDir(manifestsDir)
+		step("Traefik", "Enforcing single source-of-truth for public routers")
+		if err := enforceSinglePublicRouterSource(traefikDir); err != nil {
+			return nil, nil, fmt.Errorf("traefik public router ownership: %w", err)
+		}
+		ok("Traefik", "single source-of-truth check passed")
+
+		traefikClient := traefik.NewClient(traefikDir)
+		if wildcardModeEnabled() {
+			step("Traefik", "Wildcard public mode enabled (skipping per-app router generation)")
+			if err := traefikClient.RebuildManagedPublicRouters(nil); err != nil {
+				return nil, nil, fmt.Errorf("traefik managed routers cleanup: %w", err)
+			}
+			apiURL := strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_URL"))
+			if apiURL == "" {
+				apiURL = strings.TrimSpace(base.Traefik.AdminEndpoint)
+			}
+			insecure := strings.EqualFold(strings.TrimSpace(viper.GetString("MN_TRAEFIK_API_INSECURE")), "true")
+			if err := verifyWildcardPublicRouter(ctx, apiURL, insecure); err != nil {
+				return nil, nil, fmt.Errorf("traefik wildcard router verification: %w", err)
+			}
+			ok("Traefik", "wildcard public router verified")
+		} else {
+			step("Traefik", "Rebuilding managed public app routers from manifests")
+			allApps, err := loader.LoadOrdered()
+			if err != nil {
+				return nil, nil, fmt.Errorf("loading manifests for traefik rebuild: %w", err)
+			}
+			if err := traefikClient.RebuildManagedPublicRouters(allApps); err != nil {
+				return nil, nil, fmt.Errorf("traefik managed routers rebuild: %w", err)
+			}
+			ok("Traefik", "managed public routers rebuilt")
+		}
+
+		step("Traefik", "Syncing router files to runtime host")
+		synced, err := syncTraefikRuntimeFiles(traefikDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("traefik runtime sync: %w", err)
+		}
+		if synced {
+			ok("Traefik", "runtime dynamic config synced")
+		} else {
+			fmt.Printf("  %s [Traefik] runtime sync skipped (set MN_TRAEFIK_RUNTIME_SSH_TARGET or MN_RUNTIME_SSH_TARGET)\n", color.YellowString("⚠"))
+		}
+
+		if !wildcardModeEnabled() {
+			step("Traefik", "Verifying public routers via Traefik API")
+			verified, err := verifyTraefikPublicRouters(ctx, traefikClient, app, base)
+			if err != nil {
+				return nil, nil, fmt.Errorf("traefik router verification: %w", err)
+			}
+			if verified {
+				ok("Traefik", "public routers present in runtime API")
+			}
+		}
+	}
+
+	step("Coolify", "Triggering deployment")
+	if err := coolifyClient.Deploy(ctx, appID); err != nil {
+		return nil, nil, fmt.Errorf("coolify deploy: %w", err)
+	}
+
+	domainHint := app.GetDomains().Private
+	if domainHint == "" {
+		domainHint = app.GetDomains().Public
+	}
+	step("Health", fmt.Sprintf("Waiting for %s to become healthy", domainHint))
+	if err := coolifyClient.WaitForHealthy(ctx, appID, 5*time.Minute); err != nil {
+		return nil, nil, fmt.Errorf("health check failed: %w", err)
+	}
+	ok("Health", "service is healthy")
+
+	if err := ensureCoolifyRuntimeContainer(ctx, coolifyClient, appID); err != nil {
+		return nil, nil, fmt.Errorf("runtime container validation: %w", err)
+	}
+	if app.Spec.Type == "coolify-app" && app.GetDomains().Public != "" {
+		step("Domain", "Verifying public DNS/TLS readiness")
+		if err := verifyPublicDomainReadiness(app); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if app.Spec.Capabilities.Webhooks {
+		githubToken := viper.GetString("GITHUB_TOKEN")
+		if githubToken == "" {
+			fmt.Printf("  %s [Webhooks] GITHUB_TOKEN not set — skipping webhook registration\n",
+				color.YellowString("⚠"))
+		} else {
+			step("Webhooks", "Reconciling GitHub webhooks")
+			ghClient := github.NewClient(githubToken)
+			repo := github.RepoSlug(app.Spec.Repository.URL)
+			allResources, err := coolifyClient.GetAppsByName(ctx, appName)
+			if err != nil {
+				fmt.Printf("  %s [Webhooks] could not list Coolify resources: %v\n",
+					color.YellowString("⚠"), err)
+			} else {
+				for i := range allResources {
+					resource := &allResources[i]
+					if _, err := coolifyClient.EnsureWebhookToken(ctx, resource); err != nil {
+						fmt.Printf("  %s [Webhooks] could not provision token for %s: %v\n",
+							color.YellowString("⚠"), resource.UUID, err)
+						continue
+					}
+					wURL := coolifyClient.WebhookURL(resource.ManualWebhookSecretGithub)
+					_, created, err := ghClient.EnsureWebhook(ctx, repo, wURL, resource.ManualWebhookSecretGithub)
+					if err != nil {
+						fmt.Printf("  %s [Webhooks] branch=%s: %v\n",
+							color.YellowString("⚠"), resource.Branch, err)
+						continue
+					}
+					action := "updated"
+					if created {
+						action = "created"
+					}
+					ok("Webhooks", fmt.Sprintf("%s (branch: %s, uuid: %s)",
+						action, resource.Branch, resource.UUID))
+				}
+			}
+		}
+	}
+
+	domains := app.GetDomains()
+	fmt.Printf("\n%s %s deployed successfully!\n", color.GreenString("✓"), color.New(color.Bold).Sprint(appName))
+	if domains.Private != "" {
+		fmt.Printf("  Private: https://%s\n", domains.Private)
+	}
+	if domains.Public != "" {
+		fmt.Printf("  Public: https://%s\n", domains.Public)
+	}
+	if app.Spec.Capabilities.DNS && app.Spec.Type != "coolify-app" {
+		fmt.Printf("\n%s DNS rewrite required (AdGuard Home → Filters → DNS rewrites):\n",
+			color.YellowString("⚠"))
+		if domains.Private != "" {
+			fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.Private))
+		}
+		if domains.Public != "" {
+			fmt.Printf("  %s → <node-ip>\n", color.CyanString(domains.Public))
+		}
+	}
+
+	return app, loader, nil
+}
+
+func findVaultDependentApps(loader *manifest.Loader, sourceApp *manifest.AppConfig) ([]string, error) {
+	if loader == nil || sourceApp == nil {
+		return nil, nil
+	}
+	allApps, err := loader.LoadAll()
+	if err != nil {
+		return nil, err
+	}
+	sourcePath := sourceApp.VaultPath()
+	dependents := make([]string, 0)
+	for _, app := range allApps {
+		if app == nil || app.Metadata.Name == sourceApp.Metadata.Name || !app.Spec.Enabled {
+			continue
+		}
+		if appReferencesVaultPath(app, sourcePath) {
+			dependents = append(dependents, app.Metadata.Name)
+		}
+	}
+	return dependents, nil
+}
+
+func appReferencesVaultPath(app *manifest.AppConfig, sourcePath string) bool {
+	for _, envVal := range app.Spec.Environment {
+		matches := vaultRefPattern.FindAllStringSubmatch(envVal, -1)
+		for _, match := range matches {
+			if len(match) == 3 && match[1] == sourcePath {
+				return true
+			}
+		}
+	}
+	for _, inject := range app.Spec.Secrets.Inject {
+		if inject.VaultPath == sourcePath {
+			return true
+		}
+	}
+	return false
 }
 
 // step prints a deployment step.
@@ -177,4 +534,55 @@ func step(component, msg string) {
 // ok prints a successful step result.
 func ok(component, msg string) {
 	fmt.Printf("  %s [%s] %s\n", color.GreenString("✓"), component, msg)
+}
+
+// vaultRefPattern matches ${vault:mn/data/path#key} references in env values.
+var vaultRefPattern = regexp.MustCompile(`\$\{vault:([^#}]+)#([^}]+)\}`)
+
+// resolveVaultRefs replaces all ${vault:path#key} references in a string
+// with actual values from OpenBao. Uses a cache to avoid repeated reads
+// of the same vault path.
+func resolveVaultRefs(
+	ctx context.Context,
+	vc *vault.Client,
+	value string,
+	cache map[string]map[string]interface{},
+) (string, error) {
+	if !strings.Contains(value, "${vault:") {
+		return value, nil
+	}
+
+	var lastErr error
+	resolved := vaultRefPattern.ReplaceAllStringFunc(value, func(match string) string {
+		subs := vaultRefPattern.FindStringSubmatch(match)
+		if len(subs) != 3 {
+			return match
+		}
+		path, key := subs[1], subs[2]
+
+		// Check cache first
+		data, cached := cache[path]
+		if !cached {
+			var err error
+			data, err = vc.KVRead(ctx, path)
+			if err != nil {
+				lastErr = fmt.Errorf("read %s: %w", path, err)
+				return match
+			}
+			if data == nil {
+				lastErr = fmt.Errorf("secret %s not found", path)
+				return match
+			}
+			cache[path] = data
+		}
+
+		val, ok := data[key]
+		if !ok {
+			lastErr = fmt.Errorf("key %q not found in %s", key, path)
+			return match
+		}
+		return fmt.Sprintf("%v", val)
+	})
+
+	return resolved, lastErr
 }

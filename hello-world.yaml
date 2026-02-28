@@ -1,0 +1,16 @@
+http:
+    routers:
+        hello-world-internal:
+            rule: Host(`hello-world.apps.mayencenouvelle.internal`)
+            service: hello-world
+            entryPoints:
+                - websecure
+            middlewares:
+                - compress
+                - security-headers
+            tls: {}
+    services:
+        hello-world:
+            loadBalancer:
+                servers:
+                    - url: http://localhost:3000
