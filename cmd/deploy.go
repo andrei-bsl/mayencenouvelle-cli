@@ -683,10 +683,32 @@ func runDatabaseBootstrap(
 		existingPassword, _ = existingSecrets["DB_PASSWORD"].(string)
 	}
 
+	// ── SSH Tunnel (if running from outside the lab network) ──────────────
+	connHost, connPort := host, port
+	if base.Database.SSHTunnel.Enabled {
+		tunnelCfg := database.TunnelConfig{
+			Enabled: true,
+			Host:    base.Database.SSHTunnel.Host,
+			Port:    base.Database.SSHTunnel.Port,
+			User:    base.Database.SSHTunnel.User,
+			KeyPath: base.Database.SSHTunnel.KeyPath,
+		}
+		step("Database", fmt.Sprintf("Opening SSH tunnel via %s → %s:%d", tunnelCfg.Host, host, port))
+		tunnel, err := database.OpenTunnel(ctx, tunnelCfg, host, port)
+		if err != nil {
+			return fmt.Errorf("database ssh tunnel: %w", err)
+		}
+		defer tunnel.Close()
+		connHost, connPort = tunnel.LocalAddr()
+		ok("Database", fmt.Sprintf("SSH tunnel established (local → %s:%d)", connHost, connPort))
+	}
+
 	// ── Provision ─────────────────────────────────────────────────────────
 	dbCfg := database.Config{
 		AdminHost:     host,
 		AdminPort:     port,
+		ConnHost:      connHost,
+		ConnPort:      connPort,
 		AdminUser:     adminUser,
 		AdminPassword: adminPassword,
 		DatabaseName:  db.Name,

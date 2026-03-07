@@ -45,10 +45,18 @@ import (
 // Config defines the desired state of a PostgreSQL database and login role.
 type Config struct {
 	// Admin connection parameters (sourced from vault admin_vault_path).
+	// These are the REAL PG host/port used in generated URLs and Credentials.
 	AdminHost     string
 	AdminPort     int
 	AdminUser     string
 	AdminPassword string
+
+	// ConnHost / ConnPort override the TCP dial address when using an SSH tunnel.
+	// If non-empty, the provisioner connects to ConnHost:ConnPort but records
+	// AdminHost:AdminPort in the generated DATABASE_URL and Credentials.
+	// Leave empty for direct connections (ConnHost == "" → use AdminHost:AdminPort).
+	ConnHost string
+	ConnPort int
 
 	// Desired app database state.
 	DatabaseName string   // database to create/verify (e.g. "public_api")
@@ -101,8 +109,18 @@ func EnsureDatabase(ctx context.Context, cfg Config, existingPassword string) (R
 		return Result{}, fmt.Errorf("database: Role is required")
 	}
 
+	// connHost:connPort is the address the provisioner actually dials.
+	// When an SSH tunnel is active, this is localhost:<tunnel-port>.
+	// Otherwise it falls back to the real AdminHost:AdminPort.
+	connHost := cfg.ConnHost
+	connPort := cfg.ConnPort
+	if connHost == "" {
+		connHost = cfg.AdminHost
+		connPort = cfg.AdminPort
+	}
+
 	// Connect as admin.
-	adminDSN := buildDSN(cfg.AdminHost, cfg.AdminPort, "postgres",
+	adminDSN := buildDSN(connHost, connPort, "postgres",
 		cfg.AdminUser, cfg.AdminPassword, "disable")
 	db, err := sql.Open("postgres", adminDSN)
 	if err != nil {
@@ -191,7 +209,7 @@ func EnsureDatabase(ctx context.Context, cfg Config, existingPassword string) (R
 	// ── Extensions ────────────────────────────────────────────────────────
 	// Connect to the target database to create extensions in the correct context.
 	if len(cfg.Extensions) > 0 {
-		extDSN := buildDSN(cfg.AdminHost, cfg.AdminPort, cfg.DatabaseName,
+		extDSN := buildDSN(connHost, connPort, cfg.DatabaseName,
 			cfg.AdminUser, cfg.AdminPassword, "disable")
 		extDB, err := sql.Open("postgres", extDSN)
 		if err != nil {

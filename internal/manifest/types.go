@@ -44,6 +44,27 @@ type DatabaseBase struct {
 	// mn-cli appends the app name: <AppsVaultPath>/<app-name>
 	// e.g. mn/data/lab/db01/apps/internal-api
 	AppsVaultPath string `yaml:"apps_vault_path"`
+	// SSHTunnel configures an SSH jump host used when the PG server is not
+	// directly reachable from the machine running mn-cli (e.g. workstation
+	// outside the lab network). When Enabled is true, a local port-forward is
+	// opened through the jump host before connecting to PostgreSQL.
+	SSHTunnel SSHTunnelConfig `yaml:"ssh_tunnel"`
+}
+
+// SSHTunnelConfig holds SSH jump-host settings for the database provisioner.
+type SSHTunnelConfig struct {
+	// Enabled gates the tunnel — set to true when running mn-cli from outside
+	// the lab network (e.g. from a developer workstation).
+	Enabled bool `yaml:"enabled"`
+	// Host is the SSH jump host hostname or IP (e.g. "lab-nas01.mayencenouvelle.internal").
+	Host string `yaml:"host"`
+	// Port is the SSH daemon port on the jump host (default: 22).
+	Port int `yaml:"port"`
+	// User is the SSH login username (default: $USER / current OS user).
+	User string `yaml:"user"`
+	// KeyPath is the path to the SSH private key file; supports ~ expansion.
+	// Defaults to ~/.ssh/id_ed25519 then ~/.ssh/id_rsa if left empty.
+	KeyPath string `yaml:"key_path"`
 }
 
 // CoolifyBase holds Coolify platform configuration.
