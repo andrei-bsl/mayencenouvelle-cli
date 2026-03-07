@@ -23,6 +23,25 @@ type BaseConfig struct {
 	Traefik      TraefikBase   `yaml:"traefik"`
 	DNS          DNSBase       `yaml:"dns"`
 	GitHub       GitHubBase    `yaml:"github"`
+	Database     DatabaseBase  `yaml:"database"`
+}
+
+// DatabaseBase holds platform-wide PostgreSQL provisioning defaults.
+// Apps that declare spec.database.enabled: true inherit these values.
+type DatabaseBase struct {
+	// DefaultHost is the PG hostname used unless overridden per-app.
+	DefaultHost string `yaml:"default_host"`
+	// DefaultPort is the PG port (default: 5432).
+	DefaultPort int `yaml:"default_port"`
+	// DefaultSSLMode is the sslmode used in DATABASE_URL (default: require).
+	DefaultSSLMode string `yaml:"default_ssl_mode"`
+	// AdminVaultPath is the vault KV v2 path holding admin credentials.
+	// Required keys at this path:
+	//   admin_user     — PostgreSQL superuser or role with CREATEDB+CREATEROLE
+	//   admin_password — admin password
+	// Optional keys (override DefaultHost / DefaultPort):
+	//   host, port
+	AdminVaultPath string `yaml:"admin_vault_path"`
 }
 
 // CoolifyBase holds Coolify platform configuration.
@@ -104,12 +123,49 @@ type Spec struct {
 	Environment          Env            `yaml:"environment"`
 	EnvironmentOverrides map[string]Env `yaml:"environment_overrides,omitempty"`
 	Secrets              Secrets        `yaml:"secrets"`
+	Database             Database       `yaml:"database,omitempty"`
 	Auth                 Auth           `yaml:"authentication"`
 	Traefik              TraefikSpec    `yaml:"traefik"`
 	Dependencies         []string       `yaml:"dependencies"`
 	Node                 string         `yaml:"node"`
 	Schedule             string         `yaml:"schedule"`
 	Note                 string         `yaml:"note"`
+}
+
+// Database describes the desired PostgreSQL database state for an app.
+// When enabled, mn-cli provisions the database and role at deploy time,
+// writes credentials to vault, and injects DATABASE_URL as an env var.
+type Database struct {
+	// Enabled activates automatic database provisioning during deploy.
+	// Default: false — the block is ignored unless explicitly set to true.
+	Enabled bool `yaml:"enabled"`
+
+	// Host overrides base.yaml database.default_host for this app.
+	// Leave empty to inherit the platform default.
+	Host string `yaml:"host,omitempty"`
+
+	// Port overrides base.yaml database.default_port for this app.
+	// Leave zero/empty to inherit the platform default (5432).
+	Port int `yaml:"port,omitempty"`
+
+	// Name is the PostgreSQL database name to create.
+	// Convention: mirror the app's role name (e.g. "public_api" for role "api").
+	Name string `yaml:"name"`
+
+	// Role is the PostgreSQL login role to create for this app.
+	// A strong random password is generated and stored in vault.
+	// Convention: short functional name, e.g. "api", "internal_api", "garmin_sync".
+	Role string `yaml:"role"`
+
+	// Extensions lists PostgreSQL extensions to enable inside the database.
+	// Applied as: CREATE EXTENSION IF NOT EXISTS "ext" in the target database.
+	// Examples: ["uuid-ossp", "pgcrypto", "pg_trgm"]
+	Extensions []string `yaml:"extensions,omitempty"`
+
+	// SSLMode sets the sslmode query parameter in the generated DATABASE_URL.
+	// Valid values: disable | require | verify-ca | verify-full.
+	// Defaults to base.yaml database.default_ssl_mode ("require").
+	SSLMode string `yaml:"ssl_mode,omitempty"`
 }
 
 // ApplyStageOverrides merges environment_overrides[stage] into the base

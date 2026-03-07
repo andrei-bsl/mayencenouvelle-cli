@@ -118,6 +118,168 @@ func (l *Loader) LoadOrdered() ([]*AppConfig, error) {
 	return ordered, nil
 }
 
+// AppFilePath returns the absolute path to an app manifest file.
+func (l *Loader) AppFilePath(name string) string {
+	return filepath.Join(l.appsDir, name+".yaml")
+}
+
+// PatchSecrets ensures the manifest for appName has:
+//  1. spec.secrets.vault_path set to vaultPath (if currently empty)
+//  2. a spec.secrets.inject entry for env: DATABASE_URL / vault_key: database_url (if missing)
+//
+// The file is edited in-place using the yaml.v3 AST, which preserves comments
+// and overall structure. Returns changed=true if the file was actually modified.
+func (l *Loader) PatchSecrets(appName, vaultPath string) (bool, error) {
+	filePath := l.AppFilePath(appName)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return false, fmt.Errorf("read manifest %s: %w", filePath, err)
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return false, fmt.Errorf("parse manifest %s: %w", filePath, err)
+	}
+	if len(doc.Content) == 0 {
+		return false, fmt.Errorf("empty manifest document")
+	}
+
+	root := doc.Content[0] // root MappingNode
+	specNode := findMappingValue(root, "spec")
+	if specNode == nil {
+		return false, fmt.Errorf("manifest has no spec block")
+	}
+
+	// Find or create spec.secrets mapping.
+	secretsNode := findMappingValue(specNode, "secrets")
+	if secretsNode == nil {
+		secretsNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		specNode.Content = append(specNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "secrets"},
+			secretsNode,
+		)
+	}
+
+	changed := false
+	patchStringValue(secretsNode, "vault_path", vaultPath, &changed)
+	patchInjectEntry(secretsNode, "DATABASE_URL", "database_url", &changed)
+
+	if !changed {
+		return false, nil
+	}
+
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return false, fmt.Errorf("marshal patched manifest: %w", err)
+	}
+	if err := os.WriteFile(filePath, out, 0o644); err != nil {
+		return false, fmt.Errorf("write patched manifest %s: %w", filePath, err)
+	}
+	return true, nil
+}
+
+// ── yaml.v3 AST helpers ───────────────────────────────────────────────────────
+
+// findMappingValue returns the value node for key in a MappingNode, or nil.
+func findMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// patchStringValue sets key=value in a MappingNode, adding the pair if absent.
+// Only modifies *changed if the file actually changes.
+func patchStringValue(mapping *yaml.Node, key, value string, changed *bool) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			// Key exists; update only if value is empty (don't overwrite intentional values).
+			if mapping.Content[i+1].Value == "" && value != "" {
+				mapping.Content[i+1].Value = value
+				*changed = true
+			}
+			return
+		}
+	}
+	// Key absent — insert before inject (if present) so vault_path appears first.
+	insertBeforeKey(mapping, key, value, "inject", changed)
+}
+
+// insertBeforeKey adds key=value pair to mapping, inserted before beforeKey if found,
+// or appended at the end otherwise.
+func insertBeforeKey(mapping *yaml.Node, key, value, beforeKey string, changed *bool) {
+	newKey := &yaml.Node{Kind: yaml.ScalarNode, Value: key}
+	newVal := &yaml.Node{Kind: yaml.ScalarNode, Value: value}
+
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == beforeKey {
+			// Build a fresh slice to avoid aliasing the original backing array
+			// (a classic Go gotcha when insert position is at the start).
+			fresh := make([]*yaml.Node, 0, len(mapping.Content)+2)
+			fresh = append(fresh, mapping.Content[:i]...)
+			fresh = append(fresh, newKey, newVal)
+			fresh = append(fresh, mapping.Content[i:]...)
+			mapping.Content = fresh
+			*changed = true
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content, newKey, newVal)
+	*changed = true
+}
+
+// patchInjectEntry ensures an inject sequence entry for envName exists under
+// the secrets MappingNode. Adds one if not found.
+func patchInjectEntry(secretsNode *yaml.Node, envName, vaultKey string, changed *bool) {
+	// Find or create inject sequence.
+	var injectSeq *yaml.Node
+	for i := 0; i+1 < len(secretsNode.Content); i += 2 {
+		if secretsNode.Content[i].Value == "inject" {
+			if secretsNode.Content[i+1].Kind == yaml.SequenceNode {
+				injectSeq = secretsNode.Content[i+1]
+			}
+			break
+		}
+	}
+	if injectSeq == nil {
+		injectSeq = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		secretsNode.Content = append(secretsNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "inject"},
+			injectSeq,
+		)
+	}
+
+	// Check if an entry for this env already exists.
+	for _, item := range injectSeq.Content {
+		if item.Kind != yaml.MappingNode {
+			continue
+		}
+		if v := findMappingValue(item, "env"); v != nil && v.Value == envName {
+			return // already present
+		}
+	}
+
+	// Prepend new entry so database_url injection is visible near the top
+	// of the inject list (convention: DB creds first, then OIDC creds).
+	entry := &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  "!!map",
+		Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "env"},
+			{Kind: yaml.ScalarNode, Value: envName},
+			{Kind: yaml.ScalarNode, Value: "vault_key"},
+			{Kind: yaml.ScalarNode, Value: vaultKey},
+		},
+	}
+	injectSeq.Content = append([]*yaml.Node{entry}, injectSeq.Content...)
+	*changed = true
+}
+
 // loadFile parses a single YAML manifest file.
 func (l *Loader) loadFile(path string) (*AppConfig, error) {
 	data, err := os.ReadFile(path)
