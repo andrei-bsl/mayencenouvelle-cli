@@ -218,6 +218,15 @@ type Auth struct {
 	//     - https://hello-world.apps.mayencenouvelle.internal/auth/callback
 	//     - https://custom.example.com/callback
 	RedirectURIs []string `yaml:"redirect_uris"`
+	// RedirectURIsRegex is an optional list of full redirect URI regex patterns
+	// sent to Authentik with matching_mode: "regex". These are always appended
+	// to the auto-derived strict URIs (or the explicit redirect_uris list) and
+	// allow a single pattern to cover multiple paths — e.g. all Swagger module
+	// pages without enumerating every sub-path.
+	// Example:
+	//   redirect_uris_regex:
+	//     - "^https://(dev-)?api\\.mayencenouvelle\\.com/docs(/[^/]+)?/oauth2-redirect\\.html$"
+	RedirectURIsRegex []string `yaml:"redirect_uris_regex"`
 }
 
 // TraefikSpec holds app-specific Traefik overrides.
