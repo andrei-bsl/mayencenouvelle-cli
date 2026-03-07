@@ -277,8 +277,8 @@ func deploySingleApp(ctx context.Context, appName, stage string) (*manifest.AppC
 	}
 
 	// ── Database Bootstrap ────────────────────────────────────────────────────
-	// Runs after Authentik (so vault path is established) and before secret
-	// injection (step below) so DATABASE_URL is available in vault for injection.
+	// Runs after Authentik (so vault path is established) and before the
+	// secrets inject pass so DATABASE_URL is set in app.Spec.Environment.
 	if app.Spec.Database.Enabled {
 		if err := runDatabaseBootstrap(ctx, app, base, loader, vaultClient); err != nil {
 			return nil, nil, fmt.Errorf("database bootstrap: %w", err)
@@ -725,39 +725,32 @@ func runDatabaseBootstrap(
 	}
 	ok("Vault", fmt.Sprintf("database credentials saved (%d keys)", len(vaultData)))
 
-	// ── Ensure in-memory inject entry so the current deploy picks it up ───
-	if !hasInjectEntry(app, "DATABASE_URL") {
-		app.Spec.Secrets.Inject = append(
-			[]manifest.SecretInject{{Env: "DATABASE_URL", VaultKey: "DATABASE_URL", VaultPath: dbAppsPath}},
-			app.Spec.Secrets.Inject...,
-		)
-		if app.Spec.Secrets.VaultPath == "" {
-			app.Spec.Secrets.VaultPath = app.EffectiveVaultPath()
-		}
+	// ── Set DATABASE_URL in memory for this deploy ─────────────────────────────
+	// Use the freshly-provisioned credentials directly rather than re-reading
+	// from vault. PatchSecrets (below) records a ${vault:...} ref in the manifest.
+	if app.Spec.Environment == nil {
+		app.Spec.Environment = make(manifest.Env)
+	}
+	if _, exists := app.Spec.Environment["DATABASE_URL"]; !exists {
+		app.Spec.Environment["DATABASE_URL"] = result.Credentials.URL
 	}
 
-	// ── Auto-patch manifest file on disk ─────────────────────────────────
+	// ── Auto-patch manifest file on disk ──────────────────────────────────
+	// Writes DATABASE_URL: "${vault:dbAppsPath#DATABASE_URL}" into spec.environment
+	// when missing, so subsequent deploys resolve it via the standard vault ref pass.
 	patched, err := loader.PatchSecrets(app.Metadata.Name, app.EffectiveVaultPath(), dbAppsPath)
 	if err != nil {
 		fmt.Printf("  %s [Database] manifest auto-patch failed (non-fatal): %v\n",
 			color.YellowString("⚠"), err)
 	} else if patched {
-		ok("Database", fmt.Sprintf("manifest auto-patched: secrets.vault_path + DATABASE_URL inject added to %s",
+		ok("Database", fmt.Sprintf("manifest auto-patched: DATABASE_URL env ref added to %s",
 			loader.AppFilePath(app.Metadata.Name)))
 	}
 
 	return nil
 }
 
-// hasInjectEntry reports whether app.Spec.Secrets.Inject has an entry for envName.
-func hasInjectEntry(app *manifest.AppConfig, envName string) bool {
-	for _, si := range app.Spec.Secrets.Inject {
-		if si.Env == envName {
-			return true
-		}
-	}
-	return false
-}
+
 
 // stringFromMap retrieves a string value from a map[string]interface{},
 // returning the fallback when the key is absent or the value is not a string.

@@ -8,7 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// minimalManifestYAML is a stripped-down manifest without secrets.inject DATABASE_URL.
+// minimalManifestYAML is a stripped-down manifest without a DATABASE_URL entry
+// (neither in environment nor in inject). Used to test that PatchSecrets adds it.
 const minimalManifestYAML = `apiVersion: mnlab/v1
 kind: AppConfig
 
@@ -45,7 +46,8 @@ spec:
         vault_key: authentik_client_id
 `
 
-// manifestWithDB is a manifest that already has DATABASE_URL in inject.
+// manifestWithDB is a manifest that already has DATABASE_URL in spec.environment.
+// Used to verify PatchSecrets is idempotent.
 const manifestWithDB = `apiVersion: mnlab/v1
 kind: AppConfig
 
@@ -75,19 +77,19 @@ spec:
   domains:
     private: test-app.apps.mayencenouvelle.internal
 
+  environment:
+    DATABASE_URL: "${vault:mn/data/lab/db01/apps/test-app#DATABASE_URL}"
+
   secrets:
     vault_path: mn/data/apps/test-app
     inject:
-      - env: DATABASE_URL
-        vault_key: DATABASE_URL
-        vault_path: mn/data/lab/db01/apps/test-app
       - env: AUTHENTIK_CLIENT_ID
         vault_key: authentik_client_id
 `
 
-// TestPatchSecrets_AddsInjectEntry verifies that PatchSecrets adds a DATABASE_URL
-// inject entry when one is missing.
-func TestPatchSecrets_AddsInjectEntry(t *testing.T) {
+// TestPatchSecrets_AddsEnvironmentEntry verifies that PatchSecrets adds a DATABASE_URL
+// entry to spec.environment when one is missing.
+func TestPatchSecrets_AddsEnvironmentEntry(t *testing.T) {
 	dir := t.TempDir()
 	appsDir := filepath.Join(dir, "apps")
 	if err := os.MkdirAll(appsDir, 0o755); err != nil {
@@ -108,7 +110,7 @@ func TestPatchSecrets_AddsInjectEntry(t *testing.T) {
 		t.Fatal("expected changed=true, got false")
 	}
 
-	// Re-parse patched file and assert DATABASE_URL is present.
+	// Re-parse patched file and assert DATABASE_URL is in environment.
 	out, err := os.ReadFile(manifestPath)
 	if err != nil {
 		t.Fatal(err)
@@ -119,18 +121,15 @@ func TestPatchSecrets_AddsInjectEntry(t *testing.T) {
 		t.Fatalf("parse patched manifest: %v", err)
 	}
 
-	found := false
-	for _, si := range app.Spec.Secrets.Inject {
-		if si.Env == "DATABASE_URL" && si.VaultKey == "DATABASE_URL" && si.VaultPath == "mn/data/lab/db01/apps/test-app" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("DATABASE_URL inject entry not found in patched manifest; inject = %+v", app.Spec.Secrets.Inject)
+	wantVal := "${vault:mn/data/lab/db01/apps/test-app#DATABASE_URL}"
+	gotVal, ok := app.Spec.Environment["DATABASE_URL"]
+	if !ok {
+		t.Errorf("DATABASE_URL not found in spec.environment; env = %+v", app.Spec.Environment)
+	} else if gotVal != wantVal {
+		t.Errorf("DATABASE_URL env value: got %q, want %q", gotVal, wantVal)
 	}
 
-	// Existing entries should be preserved.
+	// Existing inject entries should be preserved.
 	foundOIDC := false
 	for _, si := range app.Spec.Secrets.Inject {
 		if si.Env == "AUTHENTIK_CLIENT_ID" {
@@ -211,6 +210,13 @@ spec:
 
 	if app.Spec.Secrets.VaultPath != "mn/data/apps/test-app" {
 		t.Errorf("vault_path not set: got %q", app.Spec.Secrets.VaultPath)
+	}
+
+	wantURL := "${vault:mn/data/lab/db01/apps/test-app#DATABASE_URL}"
+	if gotURL, ok := app.Spec.Environment["DATABASE_URL"]; !ok {
+		t.Error("DATABASE_URL not added to spec.environment")
+	} else if gotURL != wantURL {
+		t.Errorf("DATABASE_URL env: got %q, want %q", gotURL, wantURL)
 	}
 }
 

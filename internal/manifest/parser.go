@@ -125,9 +125,10 @@ func (l *Loader) AppFilePath(name string) string {
 
 // PatchSecrets ensures the manifest for appName has:
 //  1. spec.secrets.vault_path set to vaultPath (if currently empty)
-//  2. a spec.secrets.inject entry for env: DATABASE_URL with vault_key: DATABASE_URL
-//     and vault_path: dbVaultPath (if missing)
+//  2. spec.environment.DATABASE_URL set to "${vault:dbVaultPath#DATABASE_URL}" (if missing)
 //
+// The environment block is used (not secrets.inject) so the vault reference is
+// self-documenting and resolved by the standard resolveVaultRefs pass at deploy time.
 // The file is edited in-place using the yaml.v3 AST, which preserves comments
 // and overall structure. Returns changed=true if the file was actually modified.
 func (l *Loader) PatchSecrets(appName, vaultPath, dbVaultPath string) (bool, error) {
@@ -151,19 +152,28 @@ func (l *Loader) PatchSecrets(appName, vaultPath, dbVaultPath string) (bool, err
 		return false, fmt.Errorf("manifest has no spec block")
 	}
 
-	// Find or create spec.secrets mapping.
-	secretsNode := findMappingValue(specNode, "secrets")
-	if secretsNode == nil {
-		secretsNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		specNode.Content = append(specNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "secrets"},
-			secretsNode,
-		)
+	changed := false
+
+	// ── Patch spec.secrets.vault_path (if provided) ──────────────────────────
+	if vaultPath != "" {
+		secretsNode := findMappingValue(specNode, "secrets")
+		if secretsNode == nil {
+			secretsNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			specNode.Content = append(specNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "secrets"},
+				secretsNode,
+			)
+		}
+		patchStringValue(secretsNode, "vault_path", vaultPath, &changed)
 	}
 
-	changed := false
-	patchStringValue(secretsNode, "vault_path", vaultPath, &changed)
-	patchInjectEntry(secretsNode, "DATABASE_URL", "DATABASE_URL", dbVaultPath, &changed)
+	// ── Patch spec.environment.DATABASE_URL with vault ref ───────────────────
+	// Written as ${vault:dbVaultPath#DATABASE_URL} so it is self-documenting
+	// and resolved by the standard resolveVaultRefs pass at deploy time.
+	if dbVaultPath != "" {
+		ref := fmt.Sprintf("${vault:%s#DATABASE_URL}", dbVaultPath)
+		patchEnvironmentValue(specNode, "DATABASE_URL", ref, &changed)
+	}
 
 	if !changed {
 		return false, nil
@@ -231,6 +241,35 @@ func insertBeforeKey(mapping *yaml.Node, key, value, beforeKey string, changed *
 		}
 	}
 	mapping.Content = append(mapping.Content, newKey, newVal)
+	*changed = true
+}
+
+// patchEnvironmentValue ensures spec.environment[key] = value in a spec MappingNode.
+// If the environment block does not exist, it is created. If the key already exists
+// (with any value), it is not overwritten — the existing value takes precedence.
+func patchEnvironmentValue(specNode *yaml.Node, key, value string, changed *bool) {
+	envNode := findMappingValue(specNode, "environment")
+	if envNode == nil {
+		envNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		specNode.Content = append(specNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
+			envNode,
+		)
+	}
+	// Key already present — don't overwrite.
+	for i := 0; i+1 < len(envNode.Content); i += 2 {
+		if envNode.Content[i].Value == key {
+			return
+		}
+	}
+	// Prepend so DATABASE_URL appears at the top of the environment block.
+	fresh := make([]*yaml.Node, 0, len(envNode.Content)+2)
+	fresh = append(fresh,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Value: value},
+	)
+	fresh = append(fresh, envNode.Content...)
+	envNode.Content = fresh
 	*changed = true
 }
 
