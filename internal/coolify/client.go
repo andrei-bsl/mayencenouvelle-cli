@@ -207,24 +207,6 @@ func (c *Client) EnsureApp(ctx context.Context, app *manifest.AppConfig, base *m
 			return nil, fmt.Errorf("create application: %w", err)
 		}
 
-		// Verify the returned UUID is actually accessible in Coolify's DB.
-		// Coolify has an edge case: DELETE removes the DB record but may leave
-		// the container running; a subsequent POST can return the stale UUID of
-		// the deleted resource while creating a NEW record under a different UUID.
-		// If the UUID resolves to all-nulls, fall back to a name+branch lookup
-		// to find the actual record that was created.
-		if verified, verifyErr := c.GetApp(ctx, resp.UUID); verifyErr != nil || verified == nil || verified.Name == "" {
-			actual, lookupErr := c.GetAppByNameAndBranch(ctx, app.Metadata.Name, app.Spec.Repository.Branch)
-			if lookupErr != nil {
-				return nil, fmt.Errorf("create application: POST returned unverifiable UUID %s and fallback lookup failed: %w", resp.UUID, lookupErr)
-			}
-			if actual != nil {
-				resp.UUID = actual.UUID
-			} else {
-				return nil, fmt.Errorf("create application: POST returned UUID %s but resource is not visible in Coolify API", resp.UUID)
-			}
-		}
-
 		// Set the domain immediately after creation via PATCH.
 		// The create endpoint ignores the domains field; a separate PATCH is required.
 		// Use http:// prefix — https:// causes Coolify to add a redirect-to-https +

@@ -76,18 +76,23 @@ Examples:
 
 		// If --rotate is requested, wipe the stored password so a new one is generated.
 		if dbRotate {
-			step("Database", "Rotating password — erasing existing database_password from vault")
-			existing, _ := vc.KVRead(ctx, app.EffectiveVaultPath())
+			dbAppsPath := base.Database.AppsVaultPath
+			if dbAppsPath == "" {
+				dbAppsPath = "mn/data/lab/db01/apps"
+			}
+			dbAppsPath = dbAppsPath + "/" + appName
+			step("Database", "Rotating password — erasing existing DB_PASSWORD from vault")
+			existing, _ := vc.KVRead(ctx, dbAppsPath)
 			if existing != nil {
-				delete(existing, "database_password")
+				delete(existing, "DB_PASSWORD")
 				clean := make(map[string]string, len(existing))
 				for k, v := range existing {
 					clean[k] = fmt.Sprintf("%v", v)
 				}
-				if err := vc.KVWrite(ctx, app.EffectiveVaultPath(), clean); err != nil {
-					return fmt.Errorf("clearing database_password from vault: %w", err)
+				if err := vc.KVWrite(ctx, dbAppsPath, clean); err != nil {
+					return fmt.Errorf("clearing DB_PASSWORD from vault: %w", err)
 				}
-				ok("Database", "database_password cleared — fresh password will be generated")
+				ok("Database", "DB_PASSWORD cleared — fresh password will be generated")
 			}
 		}
 
@@ -133,6 +138,10 @@ Examples:
 		if err != nil {
 			return err
 		}
+		base, err := loader.LoadBase()
+		if err != nil {
+			return fmt.Errorf("loading base config: %w", err)
+		}
 
 		if !app.Spec.Database.Enabled {
 			fmt.Printf("%s %s does not have spec.database.enabled: true\n",
@@ -149,14 +158,19 @@ Examples:
 			return fmt.Errorf("vault not configured — set BAO_ADDR + BAO_TOKEN")
 		}
 
-		vaultPath := app.EffectiveVaultPath()
-		data, err := vc.KVRead(ctx, vaultPath)
+		dbAppsPath := base.Database.AppsVaultPath
+		if dbAppsPath == "" {
+			dbAppsPath = "mn/data/lab/db01/apps"
+		}
+		dbAppsPath = dbAppsPath + "/" + appName
+
+		data, err := vc.KVRead(ctx, dbAppsPath)
 		if err != nil {
-			return fmt.Errorf("read vault path %s: %w", vaultPath, err)
+			return fmt.Errorf("read vault path %s: %w", dbAppsPath, err)
 		}
 
 		fmt.Printf("\n%s Database info for %s\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName))
-		fmt.Printf("  Vault path: %s\n\n", color.New(color.Faint).Sprint(vaultPath))
+		fmt.Printf("  Vault path: %s\n\n", color.New(color.Faint).Sprint(dbAppsPath))
 
 		if data == nil {
 			fmt.Printf("  %s No database credentials found at vault path.\n"+
@@ -166,7 +180,7 @@ Examples:
 			return nil
 		}
 
-		keys := []string{"database_host", "database_port", "database_name", "database_user", "database_url"}
+		keys := []string{"DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DATABASE_URL"}
 		for _, k := range keys {
 			v, ok := data[k]
 			if !ok {
@@ -174,26 +188,24 @@ Examples:
 			}
 			label := color.New(color.Bold).Sprintf("%-20s", k)
 			val := fmt.Sprintf("%v", v)
-			// Redact password from URL but show the rest
-			if k == "database_url" {
+			if k == "DATABASE_URL" {
 				val = redactURL(val)
 			}
 			fmt.Printf("  %s %s\n", label, val)
 		}
 
-		// Password: show only that it exists, not the value
-		if _, hasPwd := data["database_password"]; hasPwd {
-			label := color.New(color.Bold).Sprintf("%-20s", "database_password")
+		if _, hasPwd := data["DB_PASSWORD"]; hasPwd {
+			label := color.New(color.Bold).Sprintf("%-20s", "DB_PASSWORD")
 			fmt.Printf("  %s %s\n", label, color.New(color.Faint).Sprint("<set — use --show-secret to reveal>"))
 		} else {
 			fmt.Printf("  %s %s\n",
-				color.New(color.Bold).Sprintf("%-20s", "database_password"),
+				color.New(color.Bold).Sprintf("%-20s", "DB_PASSWORD"),
 				color.YellowString("not set — run mn-cli db bootstrap %s", appName))
 		}
 
 		if showSecret {
-			if pwd, ok := data["database_password"]; ok {
-				fmt.Printf("\n  %s\n", color.RedString("⚠ database_password (sensitive):"))
+			if pwd, ok := data["DB_PASSWORD"]; ok {
+				fmt.Printf("\n  %s\n", color.RedString("⚠ DB_PASSWORD (sensitive):"))
 				fmt.Printf("  %v\n", pwd)
 			}
 		}

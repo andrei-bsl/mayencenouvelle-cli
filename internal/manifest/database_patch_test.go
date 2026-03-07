@@ -79,7 +79,8 @@ spec:
     vault_path: mn/data/apps/test-app
     inject:
       - env: DATABASE_URL
-        vault_key: database_url
+        vault_key: DATABASE_URL
+        vault_path: mn/data/lab/db01/apps/test-app
       - env: AUTHENTIK_CLIENT_ID
         vault_key: authentik_client_id
 `
@@ -99,7 +100,7 @@ func TestPatchSecrets_AddsInjectEntry(t *testing.T) {
 	}
 
 	loader := &Loader{manifestsDir: dir, appsDir: appsDir}
-	changed, err := loader.PatchSecrets("test-app", "mn/data/apps/test-app")
+	changed, err := loader.PatchSecrets("test-app", "mn/data/apps/test-app", "mn/data/lab/db01/apps/test-app")
 	if err != nil {
 		t.Fatalf("PatchSecrets error: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestPatchSecrets_AddsInjectEntry(t *testing.T) {
 
 	found := false
 	for _, si := range app.Spec.Secrets.Inject {
-		if si.Env == "DATABASE_URL" && si.VaultKey == "database_url" {
+		if si.Env == "DATABASE_URL" && si.VaultKey == "DATABASE_URL" && si.VaultPath == "mn/data/lab/db01/apps/test-app" {
 			found = true
 			break
 		}
@@ -154,7 +155,7 @@ func TestPatchSecrets_Idempotent(t *testing.T) {
 
 	loader := &Loader{manifestsDir: dir, appsDir: appsDir}
 
-	changed, err := loader.PatchSecrets("test-app", "mn/data/apps/test-app")
+	changed, err := loader.PatchSecrets("test-app", "mn/data/apps/test-app", "mn/data/lab/db01/apps/test-app")
 	if err != nil {
 		t.Fatalf("PatchSecrets error: %v", err)
 	}
@@ -196,7 +197,7 @@ spec:
 	os.WriteFile(filepath.Join(appsDir, "test-app.yaml"), []byte(noVaultPath), 0o644)
 
 	loader := &Loader{manifestsDir: dir, appsDir: appsDir}
-	changed, err := loader.PatchSecrets("test-app", "mn/data/apps/test-app")
+	changed, err := loader.PatchSecrets("test-app", "mn/data/apps/test-app", "mn/data/lab/db01/apps/test-app")
 	if err != nil {
 		t.Fatalf("PatchSecrets error: %v", err)
 	}

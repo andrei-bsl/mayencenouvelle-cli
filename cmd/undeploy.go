@@ -127,18 +127,6 @@ Examples:
 				fmt.Printf("  %s [Authentik] shared provider/application preserved (another stage remains)\n", color.YellowString("⚠"))
 			}
 
-			// Stop the container before removing the Coolify DB record.
-			// Without this, DELETE removes the Coolify entry but leaves the Docker
-			// container running as a zombie — it keeps serving traffic via its
-			// baked-in Traefik labels indefinitely.
-			step("Coolify", fmt.Sprintf("Stopping %s before deletion", appName))
-			if stopErr := coolifyClient.Stop(ctx, svc.UUID); stopErr != nil {
-				// Non-fatal: container may already be stopped, or Coolify may stop it
-				// as part of its own delete flow on some versions. Log and continue.
-				fmt.Printf("  %s [Coolify] pre-delete stop: %v (continuing)\n",
-					color.YellowString("⚠"), stopErr)
-			}
-
 			step("Coolify", fmt.Sprintf("Deleting %s", appName))
 			if err := coolifyClient.Delete(ctx, svc.UUID); err != nil {
 				return fmt.Errorf("coolify delete: %w", err)

@@ -125,11 +125,12 @@ func (l *Loader) AppFilePath(name string) string {
 
 // PatchSecrets ensures the manifest for appName has:
 //  1. spec.secrets.vault_path set to vaultPath (if currently empty)
-//  2. a spec.secrets.inject entry for env: DATABASE_URL / vault_key: database_url (if missing)
+//  2. a spec.secrets.inject entry for env: DATABASE_URL with vault_key: DATABASE_URL
+//     and vault_path: dbVaultPath (if missing)
 //
 // The file is edited in-place using the yaml.v3 AST, which preserves comments
 // and overall structure. Returns changed=true if the file was actually modified.
-func (l *Loader) PatchSecrets(appName, vaultPath string) (bool, error) {
+func (l *Loader) PatchSecrets(appName, vaultPath, dbVaultPath string) (bool, error) {
 	filePath := l.AppFilePath(appName)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -162,7 +163,7 @@ func (l *Loader) PatchSecrets(appName, vaultPath string) (bool, error) {
 
 	changed := false
 	patchStringValue(secretsNode, "vault_path", vaultPath, &changed)
-	patchInjectEntry(secretsNode, "DATABASE_URL", "database_url", &changed)
+	patchInjectEntry(secretsNode, "DATABASE_URL", "DATABASE_URL", dbVaultPath, &changed)
 
 	if !changed {
 		return false, nil
@@ -234,8 +235,9 @@ func insertBeforeKey(mapping *yaml.Node, key, value, beforeKey string, changed *
 }
 
 // patchInjectEntry ensures an inject sequence entry for envName exists under
-// the secrets MappingNode. Adds one if not found.
-func patchInjectEntry(secretsNode *yaml.Node, envName, vaultKey string, changed *bool) {
+// the secrets MappingNode. Adds one if not found. If vaultPath is non-empty it
+// is written as vault_path in the new entry (cross-path injection).
+func patchInjectEntry(secretsNode *yaml.Node, envName, vaultKey, vaultPath string, changed *bool) {
 	// Find or create inject sequence.
 	var injectSeq *yaml.Node
 	for i := 0; i+1 < len(secretsNode.Content); i += 2 {
@@ -264,7 +266,7 @@ func patchInjectEntry(secretsNode *yaml.Node, envName, vaultKey string, changed 
 		}
 	}
 
-	// Prepend new entry so database_url injection is visible near the top
+	// Prepend new entry so DATABASE_URL injection is visible near the top
 	// of the inject list (convention: DB creds first, then OIDC creds).
 	entry := &yaml.Node{
 		Kind: yaml.MappingNode,
@@ -275,6 +277,12 @@ func patchInjectEntry(secretsNode *yaml.Node, envName, vaultKey string, changed 
 			{Kind: yaml.ScalarNode, Value: "vault_key"},
 			{Kind: yaml.ScalarNode, Value: vaultKey},
 		},
+	}
+	if vaultPath != "" {
+		entry.Content = append(entry.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "vault_path"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: vaultPath},
+		)
 	}
 	injectSeq.Content = append([]*yaml.Node{entry}, injectSeq.Content...)
 	*changed = true

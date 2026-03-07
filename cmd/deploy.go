@@ -106,11 +106,11 @@ Examples:
 			return err
 		}
 
-	for _, app := range apps {
-		if !app.Spec.Enabled {
-			fmt.Printf("  ⏸  %s (disabled)\n", app.Metadata.Name)
-			continue
-		}
+		for _, app := range apps {
+			if !app.Spec.Enabled {
+				fmt.Printf("  ⏸  %s (disabled)\n", app.Metadata.Name)
+				continue
+			}
 			// Delegate to deployCmd logic
 			if err := runDeploy(app.Metadata.Name); err != nil {
 				return fmt.Errorf("deploy %s: %w", app.Metadata.Name, err)
@@ -621,7 +621,7 @@ func runDatabaseBootstrap(
 	// ── Read admin credentials from vault ─────────────────────────────────
 	adminPath := base.Database.AdminVaultPath
 	if adminPath == "" {
-		adminPath = "mn/data/platform/db01" // hardcoded fallback
+		adminPath = "mn/data/lab/db01/admin/postgres-superuser" // hardcoded fallback
 	}
 	step("Database", fmt.Sprintf("Reading admin credentials from vault (%s)", adminPath))
 	adminData, err := vc.KVRead(ctx, adminPath)
@@ -631,8 +631,8 @@ func runDatabaseBootstrap(
 	if adminData == nil {
 		return fmt.Errorf(
 			"admin credentials not found at %s — seed them first:\n"+
-				"  bao kv put %s admin_user=postgres admin_password=<pass> host=%s port=5432",
-			adminPath, adminPath, base.Database.DefaultHost)
+				"  bao kv put %s DB_USER=postgres DB_PASSWORD=<pass>",
+			adminPath, adminPath)
 	}
 
 	// Resolve host / port: app manifest overrides > vault admin data > base.yaml defaults.
@@ -660,19 +660,27 @@ func runDatabaseBootstrap(
 		sslMode = "require"
 	}
 
-	adminUser := stringFromMap(adminData, "admin_user", "postgres")
-	adminPassword := stringFromMap(adminData, "admin_password", "")
+	adminUser := stringFromMap(adminData, "DB_USER", "postgres")
+	adminPassword := stringFromMap(adminData, "DB_PASSWORD", "")
 	if adminPassword == "" {
-		return fmt.Errorf("admin_password is empty at vault path %s", adminPath)
+		return fmt.Errorf("DB_PASSWORD is empty at vault path %s", adminPath)
 	}
 
 	step("Database", fmt.Sprintf("Provisioning database %q / role %q on %s:%d", db.Name, db.Role, host, port))
 
 	// ── Read existing app password (avoid rotation on re-deploy) ──────────
+	// App DB credentials are stored at mn/data/lab/db01/apps/<name> (separate
+	// from the general app vault path which holds OIDC + other credentials).
+	dbAppsPath := base.Database.AppsVaultPath
+	if dbAppsPath == "" {
+		dbAppsPath = "mn/data/lab/db01/apps"
+	}
+	dbAppsPath = dbAppsPath + "/" + app.Metadata.Name
+
 	existingPassword := ""
-	existingSecrets, _ := vc.KVRead(ctx, app.EffectiveVaultPath())
+	existingSecrets, _ := vc.KVRead(ctx, dbAppsPath)
 	if existingSecrets != nil {
-		existingPassword, _ = existingSecrets["database_password"].(string)
+		existingPassword, _ = existingSecrets["DB_PASSWORD"].(string)
 	}
 
 	// ── Provision ─────────────────────────────────────────────────────────
@@ -701,16 +709,18 @@ func runDatabaseBootstrap(
 	ok("Database", fmt.Sprintf("role %q / database %q %s on %s:%d", db.Role, db.Name, action, host, port))
 
 	// ── Write credentials to vault ────────────────────────────────────────
+	// Key names match the convention already in use at mn/data/lab/db01/apps/*:
+	// DATABASE_URL, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD.
 	vaultData := map[string]string{
-		"database_url":      result.Credentials.URL,
-		"database_host":     result.Credentials.Host,
-		"database_port":     fmt.Sprintf("%d", result.Credentials.Port),
-		"database_name":     result.Credentials.DatabaseName,
-		"database_user":     result.Credentials.User,
-		"database_password": result.Credentials.Password,
+		"DATABASE_URL": result.Credentials.URL,
+		"DB_HOST":      result.Credentials.Host,
+		"DB_PORT":      fmt.Sprintf("%d", result.Credentials.Port),
+		"DB_NAME":      result.Credentials.DatabaseName,
+		"DB_USER":      result.Credentials.User,
+		"DB_PASSWORD":  result.Credentials.Password,
 	}
-	step("Vault", fmt.Sprintf("Saving database credentials → %s", app.EffectiveVaultPath()))
-	if err := vc.KVWrite(ctx, app.EffectiveVaultPath(), vaultData); err != nil {
+	step("Vault", fmt.Sprintf("Saving database credentials → %s", dbAppsPath))
+	if err := vc.KVWrite(ctx, dbAppsPath, vaultData); err != nil {
 		return fmt.Errorf("write database credentials to vault: %w", err)
 	}
 	ok("Vault", fmt.Sprintf("database credentials saved (%d keys)", len(vaultData)))
@@ -718,7 +728,7 @@ func runDatabaseBootstrap(
 	// ── Ensure in-memory inject entry so the current deploy picks it up ───
 	if !hasInjectEntry(app, "DATABASE_URL") {
 		app.Spec.Secrets.Inject = append(
-			[]manifest.SecretInject{{Env: "DATABASE_URL", VaultKey: "database_url"}},
+			[]manifest.SecretInject{{Env: "DATABASE_URL", VaultKey: "DATABASE_URL", VaultPath: dbAppsPath}},
 			app.Spec.Secrets.Inject...,
 		)
 		if app.Spec.Secrets.VaultPath == "" {
@@ -727,7 +737,7 @@ func runDatabaseBootstrap(
 	}
 
 	// ── Auto-patch manifest file on disk ─────────────────────────────────
-	patched, err := loader.PatchSecrets(app.Metadata.Name, app.EffectiveVaultPath())
+	patched, err := loader.PatchSecrets(app.Metadata.Name, app.EffectiveVaultPath(), dbAppsPath)
 	if err != nil {
 		fmt.Printf("  %s [Database] manifest auto-patch failed (non-fatal): %v\n",
 			color.YellowString("⚠"), err)

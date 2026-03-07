@@ -37,11 +37,13 @@ type DatabaseBase struct {
 	DefaultSSLMode string `yaml:"default_ssl_mode"`
 	// AdminVaultPath is the vault KV v2 path holding admin credentials.
 	// Required keys at this path:
-	//   admin_user     — PostgreSQL superuser or role with CREATEDB+CREATEROLE
-	//   admin_password — admin password
-	// Optional keys (override DefaultHost / DefaultPort):
-	//   host, port
+	//   DB_USER     — PostgreSQL superuser or role with CREATEDB+CREATEROLE
+	//   DB_PASSWORD — admin password
 	AdminVaultPath string `yaml:"admin_vault_path"`
+	// AppsVaultPath is the base vault path where per-app DB credentials are written.
+	// mn-cli appends the app name: <AppsVaultPath>/<app-name>
+	// e.g. mn/data/lab/db01/apps/internal-api
+	AppsVaultPath string `yaml:"apps_vault_path"`
 }
 
 // CoolifyBase holds Coolify platform configuration.
