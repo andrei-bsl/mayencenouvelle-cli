@@ -56,7 +56,7 @@ type SSHTunnelConfig struct {
 	// Enabled gates the tunnel — set to true when running mn-cli from outside
 	// the lab network (e.g. from a developer workstation).
 	Enabled bool `yaml:"enabled"`
-	// Host is the SSH jump host hostname or IP (e.g. "lab-nas01.mayencenouvelle.internal").
+	// Host is the SSH jump host hostname or IP (e.g. "192.168.178.15").
 	Host string `yaml:"host"`
 	// Port is the SSH daemon port on the jump host (default: 22).
 	Port int `yaml:"port"`
@@ -65,6 +65,14 @@ type SSHTunnelConfig struct {
 	// KeyPath is the path to the SSH private key file; supports ~ expansion.
 	// Defaults to ~/.ssh/id_ed25519 then ~/.ssh/id_rsa if left empty.
 	KeyPath string `yaml:"key_path"`
+	// RemoteHost is the host to connect to *inside* the SSH session.
+	// When SSHing directly into the DB VM, set this to "localhost" so that
+	// PostgreSQL sees the connection as 127.0.0.1 (matches pg_hba.conf).
+	// Defaults to "localhost" when empty.
+	RemoteHost string `yaml:"remote_host"`
+	// RemotePort is the PostgreSQL port inside the SSH session.
+	// Defaults to the database default_port when zero.
+	RemotePort int `yaml:"remote_port"`
 }
 
 // CoolifyBase holds Coolify platform configuration.

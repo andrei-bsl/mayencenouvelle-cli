@@ -693,8 +693,16 @@ func runDatabaseBootstrap(
 			User:    base.Database.SSHTunnel.User,
 			KeyPath: base.Database.SSHTunnel.KeyPath,
 		}
-		step("Database", fmt.Sprintf("Opening SSH tunnel via %s → %s:%d", tunnelCfg.Host, host, port))
-		tunnel, err := database.OpenTunnel(ctx, tunnelCfg, host, port)
+		remoteHost := base.Database.SSHTunnel.RemoteHost
+		if remoteHost == "" {
+			remoteHost = "localhost"
+		}
+		remotePort := base.Database.SSHTunnel.RemotePort
+		if remotePort == 0 {
+			remotePort = port
+		}
+		step("Database", fmt.Sprintf("Opening SSH tunnel via %s → %s:%d", tunnelCfg.Host, remoteHost, remotePort))
+		tunnel, err := database.OpenTunnel(ctx, tunnelCfg, remoteHost, remotePort)
 		if err != nil {
 			return fmt.Errorf("database ssh tunnel: %w", err)
 		}
