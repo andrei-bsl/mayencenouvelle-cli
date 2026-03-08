@@ -759,7 +759,15 @@ func runDatabaseBootstrap(
 		return fmt.Errorf("write database credentials to vault: %w", err)
 	}
 	ok("Vault", fmt.Sprintf("database credentials saved (%d keys)", len(vaultData)))
-
+	// ── DBgate connection hint (shown once on first-time creation) ─────────
+	if result.Created {
+		fmt.Printf("\n  %s [Database] New database ready — add to DBgate:\n", color.CyanString("ℹ"))
+		fmt.Printf("      Host:     %s\n", host)
+		fmt.Printf("      Port:     %d\n", port)
+		fmt.Printf("      Database: %s\n", db.Name)
+		fmt.Printf("      User:     %s\n", db.Role)
+		fmt.Printf("      Password: (vault: %s#DB_PASSWORD)\n", dbAppsPath)
+	}
 	// ── Set DATABASE_URL in memory for this deploy ─────────────────────────────
 	// Use the freshly-provisioned credentials directly rather than re-reading
 	// from vault. PatchSecrets (below) records a ${vault:...} ref in the manifest.

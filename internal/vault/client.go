@@ -140,6 +140,34 @@ func (c *Client) KVWrite(ctx context.Context, path string, data map[string]strin
 	return nil
 }
 
+// KVDelete deletes (soft-deletes) the latest version of a KV v2 secret.
+// path is the full API path including "data/" prefix, e.g. "mn/data/apps/hello-world".
+// Returns nil when the secret does not exist (idempotent).
+func (c *Client) KVDelete(ctx context.Context, path string) error {
+	url := fmt.Sprintf("%s/v1/%s", c.addr, path)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("vault: build request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("vault: DELETE %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("vault: DELETE %s → HTTP %d: %s", path, resp.StatusCode, string(raw))
+	}
+	return nil
+}
+
 // setHeaders adds auth and namespace headers to the request.
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("X-Vault-Token", c.token)

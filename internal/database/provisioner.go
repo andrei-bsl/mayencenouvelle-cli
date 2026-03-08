@@ -267,6 +267,62 @@ func EnsureDatabase(ctx context.Context, cfg Config, existingPassword string) (R
 	return result, nil
 }
 
+// DropDatabase terminates all active connections to the named database, then
+// drops the database and the login role. It is safe to call when neither the
+// database nor the role exist (both use IF EXISTS). It connects via
+// ConnHost:ConnPort (tunnel-aware), just like EnsureDatabase.
+func DropDatabase(ctx context.Context, cfg Config) error {
+	if cfg.AdminHost == "" {
+		return fmt.Errorf("database: AdminHost is required")
+	}
+	if cfg.AdminPort == 0 {
+		cfg.AdminPort = 5432
+	}
+
+	connHost := cfg.ConnHost
+	connPort := cfg.ConnPort
+	if connHost == "" {
+		connHost = cfg.AdminHost
+		connPort = cfg.AdminPort
+	}
+
+	adminDSN := buildDSN(connHost, connPort, "postgres",
+		cfg.AdminUser, cfg.AdminPassword, "disable")
+	db, err := sql.Open("postgres", adminDSN)
+	if err != nil {
+		return fmt.Errorf("database: open admin connection: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("database: ping %s:%d as %s: %w",
+			cfg.AdminHost, cfg.AdminPort, cfg.AdminUser, err)
+	}
+
+	// Terminate active connections so DROP DATABASE does not hang.
+	if exists, _ := databaseExists(ctx, db, cfg.DatabaseName); exists {
+		_, _ = db.ExecContext(ctx,
+			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+			cfg.DatabaseName)
+		if _, err := db.ExecContext(ctx,
+			fmt.Sprintf(`DROP DATABASE IF EXISTS %s`, quoteIdent(cfg.DatabaseName)),
+		); err != nil {
+			return fmt.Errorf("database: drop database %q: %w", cfg.DatabaseName, err)
+		}
+	}
+
+	if exists, _ := roleExists(ctx, db, cfg.Role); exists {
+		if _, err := db.ExecContext(ctx,
+			fmt.Sprintf(`DROP ROLE IF EXISTS %s`, quoteIdent(cfg.Role)),
+		); err != nil {
+			return fmt.Errorf("database: drop role %q: %w", cfg.Role, err)
+		}
+	}
+
+	return nil
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func buildURL(host string, port int, dbName, user, password, sslMode string) string {
