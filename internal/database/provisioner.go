@@ -178,18 +178,16 @@ func EnsureDatabase(ctx context.Context, cfg Config, existingPassword string) (R
 
 	if !dbAlreadyExists {
 		// CREATE DATABASE cannot run inside a transaction, use ExecContext directly.
+		// Do NOT set OWNER here: if the admin is not a superuser (e.g. mn_automation
+		// with CREATEDB+CREATEROLE but not SUPERUSER), setting OWNER to the app role
+		// immediately transfers ownership, leaving the admin unable to GRANT on it.
+		// The admin retains ownership; apps get access via explicit GRANTs below.
 		if _, err := db.ExecContext(ctx,
-			fmt.Sprintf(`CREATE DATABASE %s OWNER %s`,
-				quoteIdent(cfg.DatabaseName), quoteIdent(cfg.Role)),
+			fmt.Sprintf(`CREATE DATABASE %s`, quoteIdent(cfg.DatabaseName)),
 		); err != nil {
 			return Result{}, fmt.Errorf("database: create database %q: %w", cfg.DatabaseName, err)
 		}
 		result.Created = true
-	} else {
-		// Best-effort ownership alignment — may fail if DB is owned by another superuser.
-		_, _ = db.ExecContext(ctx,
-			fmt.Sprintf(`ALTER DATABASE %s OWNER TO %s`,
-				quoteIdent(cfg.DatabaseName), quoteIdent(cfg.Role)))
 	}
 
 	// ── Grants ───────────────────────────────────────────────────────────
@@ -206,19 +204,30 @@ func EnsureDatabase(ctx context.Context, cfg Config, existingPassword string) (R
 		fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
 			quoteIdent(cfg.DatabaseName), quoteIdent(cfg.Role)))
 
-	// ── Extensions ────────────────────────────────────────────────────────
-	// Connect to the target database to create extensions in the correct context.
-	if len(cfg.Extensions) > 0 {
-		extDSN := buildDSN(connHost, connPort, cfg.DatabaseName,
+	// ── Schema + Extensions ───────────────────────────────────────────────
+	// Connect to the target database to grant schema access and create extensions.
+	// This is always done (not just when extensions are requested) because a
+	// non-superuser admin (e.g. mn_automation) must explicitly grant schema
+	// privileges so the app role can create tables in the public schema.
+	{
+		targetDSN := buildDSN(connHost, connPort, cfg.DatabaseName,
 			cfg.AdminUser, cfg.AdminPassword, "disable")
-		extDB, err := sql.Open("postgres", extDSN)
+		targetDB, err := sql.Open("postgres", targetDSN)
 		if err != nil {
-			return Result{}, fmt.Errorf("database: open connection to %q for extensions: %w", cfg.DatabaseName, err)
+			return Result{}, fmt.Errorf("database: open connection to %q for schema grants: %w", cfg.DatabaseName, err)
 		}
-		defer extDB.Close()
+		defer targetDB.Close()
+
+		// Grant full access on the public schema so the app role can create tables.
+		// Required on PG 15+ where CREATE on public is no longer granted to PUBLIC.
+		if _, err := targetDB.ExecContext(ctx,
+			fmt.Sprintf(`GRANT ALL ON SCHEMA public TO %s`, quoteIdent(cfg.Role)),
+		); err != nil {
+			return Result{}, fmt.Errorf("database: grant schema public to %q: %w", cfg.Role, err)
+		}
 
 		for _, ext := range cfg.Extensions {
-			if _, err := extDB.ExecContext(ctx,
+			if _, err := targetDB.ExecContext(ctx,
 				fmt.Sprintf(`CREATE EXTENSION IF NOT EXISTS %s`, quoteIdent(ext)),
 			); err != nil {
 				return Result{}, fmt.Errorf("database: enable extension %q in %q: %w",
