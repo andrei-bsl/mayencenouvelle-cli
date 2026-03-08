@@ -11,6 +11,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/authentik"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/coolify"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/database"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/traefik"
@@ -105,11 +106,11 @@ Examples:
 			return err
 		}
 
-	for _, app := range apps {
-		if !app.Spec.Enabled {
-			fmt.Printf("  ⏸  %s (disabled)\n", app.Metadata.Name)
-			continue
-		}
+		for _, app := range apps {
+			if !app.Spec.Enabled {
+				fmt.Printf("  ⏸  %s (disabled)\n", app.Metadata.Name)
+				continue
+			}
 			// Delegate to deployCmd logic
 			if err := runDeploy(app.Metadata.Name); err != nil {
 				return fmt.Errorf("deploy %s: %w", app.Metadata.Name, err)
@@ -252,6 +253,7 @@ func deploySingleApp(ctx context.Context, appName, stage string) (*manifest.AppC
 	if vaultClient.Enabled() && clientID != "" {
 		authentikURL := viper.GetString("AUTHENTIK_URL")
 		slug := app.AppSlug()
+
 		vaultData := map[string]string{
 			"authentik_client_id":     clientID,
 			"authentik_client_secret": clientSecret,
@@ -272,6 +274,15 @@ func deploySingleApp(ctx context.Context, appName, stage string) (*manifest.AppC
 	} else if !vaultClient.Enabled() && clientID != "" {
 		fmt.Printf("  %s [Vault] BAO_ADDR/BAO_TOKEN not configured — skipping credential save\n",
 			color.YellowString("⚠"))
+	}
+
+	// ── Database Bootstrap ────────────────────────────────────────────────────
+	// Runs after Authentik (so vault path is established) and before the
+	// secrets inject pass so DATABASE_URL is set in app.Spec.Environment.
+	if app.Spec.Database.Enabled {
+		if err := runDatabaseBootstrap(ctx, app, base, loader, vaultClient); err != nil {
+			return nil, nil, fmt.Errorf("database bootstrap: %w", err)
+		}
 	}
 
 	if vaultClient.Enabled() && len(app.Spec.Secrets.Inject) > 0 {
@@ -406,13 +417,17 @@ func deploySingleApp(ctx context.Context, appName, stage string) (*manifest.AppC
 	if err := coolifyClient.Deploy(ctx, appID); err != nil {
 		return nil, nil, fmt.Errorf("coolify deploy: %w", err)
 	}
+	// Brief pause so Coolify transitions the status away from the previous
+	// "running" container before we start polling — avoids a false-healthy
+	// return while the new build is still in progress.
+	time.Sleep(15 * time.Second)
 
 	domainHint := app.GetDomains().Private
 	if domainHint == "" {
 		domainHint = app.GetDomains().Public
 	}
 	step("Health", fmt.Sprintf("Waiting for %s to become healthy", domainHint))
-	if err := coolifyClient.WaitForHealthy(ctx, appID, 5*time.Minute); err != nil {
+	if err := coolifyClient.WaitForHealthy(ctx, appID, 15*time.Minute); err != nil {
 		return nil, nil, fmt.Errorf("health check failed: %w", err)
 	}
 	ok("Health", "service is healthy")
@@ -585,4 +600,229 @@ func resolveVaultRefs(
 	})
 
 	return resolved, lastErr
+}
+
+// runDatabaseBootstrap provisions the PostgreSQL database and role declared in
+// app.Spec.Database, stores credentials in vault, and auto-patches the manifest
+// file if secrets.inject is missing the DATABASE_URL entry.
+//
+// It is called from deploySingleApp when spec.database.enabled: true.
+func runDatabaseBootstrap(
+	ctx context.Context,
+	app *manifest.AppConfig,
+	base *manifest.BaseConfig,
+	loader *manifest.Loader,
+	vc *vault.Client,
+) error {
+	db := app.Spec.Database
+
+	if !vc.Enabled() {
+		fmt.Printf("  %s [Database] vault not configured — skipping DB bootstrap (set BAO_ADDR + BAO_TOKEN)\n",
+			color.YellowString("⚠"))
+		return nil
+	}
+
+	// ── Read admin credentials from vault ─────────────────────────────────
+	adminPath := base.Database.AdminVaultPath
+	if adminPath == "" {
+		adminPath = "mn/data/lab/db01/admin/postgres-superuser" // hardcoded fallback
+	}
+	step("Database", fmt.Sprintf("Reading admin credentials from vault (%s)", adminPath))
+	adminData, err := vc.KVRead(ctx, adminPath)
+	if err != nil {
+		return fmt.Errorf("read admin creds at %s: %w", adminPath, err)
+	}
+	if adminData == nil {
+		return fmt.Errorf(
+			"admin credentials not found at %s — seed them first:\n"+
+				"  bao kv put %s DB_USER=postgres DB_PASSWORD=<pass>",
+			adminPath, adminPath)
+	}
+
+	// Resolve host / port: app manifest overrides > vault admin data > base.yaml defaults.
+	host := db.Host
+	if host == "" {
+		host = stringFromMap(adminData, "host", base.Database.DefaultHost)
+	}
+	if host == "" {
+		return fmt.Errorf("database host is not configured — set base.yaml database.default_host or spec.database.host")
+	}
+
+	port := db.Port
+	if port == 0 {
+		port = intFromMap(adminData, "port", base.Database.DefaultPort)
+	}
+	if port == 0 {
+		port = 5432
+	}
+
+	sslMode := db.SSLMode
+	if sslMode == "" {
+		sslMode = base.Database.DefaultSSLMode
+	}
+	if sslMode == "" {
+		sslMode = "require"
+	}
+
+	adminUser := stringFromMap(adminData, "DB_USER", "postgres")
+	adminPassword := stringFromMap(adminData, "DB_PASSWORD", "")
+	if adminPassword == "" {
+		return fmt.Errorf("DB_PASSWORD is empty at vault path %s", adminPath)
+	}
+
+	step("Database", fmt.Sprintf("Provisioning database %q / role %q on %s:%d", db.Name, db.Role, host, port))
+
+	// ── Read existing app password (avoid rotation on re-deploy) ──────────
+	// App DB credentials are stored at mn/data/lab/db01/apps/<name> (separate
+	// from the general app vault path which holds OIDC + other credentials).
+	dbAppsPath := base.Database.AppsVaultPath
+	if dbAppsPath == "" {
+		dbAppsPath = "mn/data/lab/db01/apps"
+	}
+	dbAppsPath = dbAppsPath + "/" + app.Metadata.Name
+
+	existingPassword := ""
+	existingSecrets, _ := vc.KVRead(ctx, dbAppsPath)
+	if existingSecrets != nil {
+		existingPassword, _ = existingSecrets["DB_PASSWORD"].(string)
+	}
+
+	// ── SSH Tunnel (if running from outside the lab network) ──────────────
+	connHost, connPort := host, port
+	if base.Database.SSHTunnel.Enabled {
+		tunnelCfg := database.TunnelConfig{
+			Enabled: true,
+			Host:    base.Database.SSHTunnel.Host,
+			Port:    base.Database.SSHTunnel.Port,
+			User:    base.Database.SSHTunnel.User,
+			KeyPath: base.Database.SSHTunnel.KeyPath,
+		}
+		remoteHost := base.Database.SSHTunnel.RemoteHost
+		if remoteHost == "" {
+			remoteHost = "localhost"
+		}
+		remotePort := base.Database.SSHTunnel.RemotePort
+		if remotePort == 0 {
+			remotePort = port
+		}
+		step("Database", fmt.Sprintf("Opening SSH tunnel via %s → %s:%d", tunnelCfg.Host, remoteHost, remotePort))
+		tunnel, err := database.OpenTunnel(ctx, tunnelCfg, remoteHost, remotePort)
+		if err != nil {
+			return fmt.Errorf("database ssh tunnel: %w", err)
+		}
+		defer tunnel.Close()
+		connHost, connPort = tunnel.LocalAddr()
+		ok("Database", fmt.Sprintf("SSH tunnel established (local → %s:%d)", connHost, connPort))
+	}
+
+	// ── Provision ─────────────────────────────────────────────────────────
+	dbCfg := database.Config{
+		AdminHost:     host,
+		AdminPort:     port,
+		ConnHost:      connHost,
+		ConnPort:      connPort,
+		AdminUser:     adminUser,
+		AdminPassword: adminPassword,
+		DatabaseName:  db.Name,
+		Role:          db.Role,
+		Extensions:    db.Extensions,
+		SSLMode:       sslMode,
+		ReadonlyRoles: base.Database.ReadonlyRoles,
+	}
+
+	result, err := database.EnsureDatabase(ctx, dbCfg, existingPassword)
+	if err != nil {
+		return err
+	}
+
+	action := "verified"
+	if result.Created {
+		action = "created"
+	} else if result.Rotated {
+		action = "rotated"
+	}
+	ok("Database", fmt.Sprintf("role %q / database %q %s on %s:%d", db.Role, db.Name, action, host, port))
+
+	// ── Write credentials to vault ────────────────────────────────────────
+	// Key names match the convention already in use at mn/data/lab/db01/apps/*:
+	// DATABASE_URL, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD.
+	vaultData := map[string]string{
+		"DATABASE_URL": result.Credentials.URL,
+		"DB_HOST":      result.Credentials.Host,
+		"DB_PORT":      fmt.Sprintf("%d", result.Credentials.Port),
+		"DB_NAME":      result.Credentials.DatabaseName,
+		"DB_USER":      result.Credentials.User,
+		"DB_PASSWORD":  result.Credentials.Password,
+	}
+	step("Vault", fmt.Sprintf("Saving database credentials → %s", dbAppsPath))
+	if err := vc.KVWrite(ctx, dbAppsPath, vaultData); err != nil {
+		return fmt.Errorf("write database credentials to vault: %w", err)
+	}
+	ok("Vault", fmt.Sprintf("database credentials saved (%d keys)", len(vaultData)))
+	// ── DBgate connection hint (shown once on first-time creation) ─────────
+	if result.Created {
+		fmt.Printf("\n  %s [Database] New database ready — add to DBgate:\n", color.CyanString("ℹ"))
+		fmt.Printf("      Host:     %s\n", host)
+		fmt.Printf("      Port:     %d\n", port)
+		fmt.Printf("      Database: %s\n", db.Name)
+		fmt.Printf("      User:     %s\n", db.Role)
+		fmt.Printf("      Password: (vault: %s#DB_PASSWORD)\n", dbAppsPath)
+	}
+	// ── Set DATABASE_URL in memory for this deploy ─────────────────────────────
+	// Use the freshly-provisioned credentials directly rather than re-reading
+	// from vault. PatchSecrets (below) records a ${vault:...} ref in the manifest.
+	if app.Spec.Environment == nil {
+		app.Spec.Environment = make(manifest.Env)
+	}
+	if _, exists := app.Spec.Environment["DATABASE_URL"]; !exists {
+		app.Spec.Environment["DATABASE_URL"] = result.Credentials.URL
+	}
+
+	// ── Auto-patch manifest file on disk ──────────────────────────────────
+	// Writes DATABASE_URL: "${vault:dbAppsPath#DATABASE_URL}" into spec.environment
+	// when missing, so subsequent deploys resolve it via the standard vault ref pass.
+	patched, err := loader.PatchSecrets(app.Metadata.Name, app.EffectiveVaultPath(), dbAppsPath)
+	if err != nil {
+		fmt.Printf("  %s [Database] manifest auto-patch failed (non-fatal): %v\n",
+			color.YellowString("⚠"), err)
+	} else if patched {
+		ok("Database", fmt.Sprintf("manifest auto-patched: DATABASE_URL env ref added to %s",
+			loader.AppFilePath(app.Metadata.Name)))
+	}
+
+	return nil
+}
+
+// stringFromMap retrieves a string value from a map[string]interface{},
+// returning the fallback when the key is absent or the value is not a string.
+func stringFromMap(m map[string]interface{}, key, fallback string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return fallback
+}
+
+// intFromMap retrieves an int value from a map[string]interface{},
+// returning the fallback when the key is absent or unparseable.
+func intFromMap(m map[string]interface{}, key string, fallback int) int {
+	if v, ok := m[key]; ok {
+		switch n := v.(type) {
+		case int:
+			if n != 0 {
+				return n
+			}
+		case float64:
+			if n != 0 {
+				return int(n)
+			}
+		case string:
+			var i int
+			if _, err := fmt.Sscanf(n, "%d", &i); err == nil && i != 0 {
+				return i
+			}
+		}
+	}
+	return fallback
 }

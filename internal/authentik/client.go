@@ -362,15 +362,26 @@ func (c *Client) patchApplication(ctx context.Context, slug string, providerPK i
 //   - Canonical private/public domain lists
 //   - Localhost entries if spec.authentication.localhost_ports is set
 //
+// In both cases, any entries in spec.authentication.redirect_uris_regex are
+// appended as regex-mode URIs. This allows a single pattern to cover multiple
+// paths (e.g. all Swagger module pages) without enumerating each sub-path.
+//
 // This produces a URI set that covers dev, prod, and local development from a single provider.
 func buildRedirectURIs(app *manifest.AppConfig, base *manifest.BaseConfig) []RedirectURI {
+	appendRegex := func(uris []RedirectURI) []RedirectURI {
+		for _, u := range app.Spec.Auth.RedirectURIsRegex {
+			uris = append(uris, RedirectURI{MatchingMode: "regex", URL: u})
+		}
+		return uris
+	}
+
 	// Explicit override: use manifest-specified URIs verbatim.
 	if len(app.Spec.Auth.RedirectURIs) > 0 {
 		uris := make([]RedirectURI, 0, len(app.Spec.Auth.RedirectURIs))
 		for _, u := range app.Spec.Auth.RedirectURIs {
 			uris = append(uris, RedirectURI{MatchingMode: "strict", URL: u})
 		}
-		return uris
+		return appendRegex(uris)
 	}
 	stageDomains := app.GetDomains()       // stage-aware (dev-* prefix for develop branch)
 	specDomains := app.NormalizedDomains() // canonical (no dev- prefix)
@@ -416,9 +427,9 @@ func buildRedirectURIs(app *manifest.AppConfig, base *manifest.BaseConfig) []Red
 	}
 
 	if uris == nil {
-		return []RedirectURI{}
+		uris = []RedirectURI{}
 	}
-	return uris
+	return appendRegex(uris)
 }
 
 // redirectURIsEqual compares two redirect URI lists as unordered sets.

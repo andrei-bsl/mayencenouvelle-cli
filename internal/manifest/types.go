@@ -23,6 +23,64 @@ type BaseConfig struct {
 	Traefik      TraefikBase   `yaml:"traefik"`
 	DNS          DNSBase       `yaml:"dns"`
 	GitHub       GitHubBase    `yaml:"github"`
+	Database     DatabaseBase  `yaml:"database"`
+}
+
+// DatabaseBase holds platform-wide PostgreSQL provisioning defaults.
+// Apps that declare spec.database.enabled: true inherit these values.
+type DatabaseBase struct {
+	// DefaultHost is the PG hostname used unless overridden per-app.
+	DefaultHost string `yaml:"default_host"`
+	// DefaultPort is the PG port (default: 5432).
+	DefaultPort int `yaml:"default_port"`
+	// DefaultSSLMode is the sslmode used in DATABASE_URL (default: require).
+	DefaultSSLMode string `yaml:"default_ssl_mode"`
+	// AdminVaultPath is the vault KV v2 path holding admin credentials.
+	// Required keys at this path:
+	//   DB_USER     — PostgreSQL superuser or role with CREATEDB+CREATEROLE
+	//   DB_PASSWORD — admin password
+	AdminVaultPath string `yaml:"admin_vault_path"`
+	// AppsVaultPath is the base vault path where per-app DB credentials are written.
+	// mn-cli appends the app name: <AppsVaultPath>/<app-name>
+	// e.g. mn/data/lab/db01/apps/internal-api
+	AppsVaultPath string `yaml:"apps_vault_path"`
+	// SSHTunnel configures an SSH jump host used when the PG server is not
+	// directly reachable from the machine running mn-cli (e.g. workstation
+	// outside the lab network). When Enabled is true, a local port-forward is
+	// opened through the jump host before connecting to PostgreSQL.
+	SSHTunnel SSHTunnelConfig `yaml:"ssh_tunnel"`
+	// ReadonlyRoles is a list of PostgreSQL roles that should get read-only
+	// access to every database provisioned by mn-cli (e.g. "dbgate_internal_ro").
+	// For each role, the provisioner runs:
+	//   GRANT CONNECT ON DATABASE <db> TO <role>
+	//   GRANT USAGE ON SCHEMA public TO <role>
+	//   GRANT SELECT ON ALL TABLES IN SCHEMA public TO <role>
+	//   ALTER DEFAULT PRIVILEGES ... GRANT SELECT ON TABLES TO <role>
+	ReadonlyRoles []string `yaml:"readonly_roles"`
+}
+
+// SSHTunnelConfig holds SSH jump-host settings for the database provisioner.
+type SSHTunnelConfig struct {
+	// Enabled gates the tunnel — set to true when running mn-cli from outside
+	// the lab network (e.g. from a developer workstation).
+	Enabled bool `yaml:"enabled"`
+	// Host is the SSH jump host hostname or IP (e.g. "192.168.178.15").
+	Host string `yaml:"host"`
+	// Port is the SSH daemon port on the jump host (default: 22).
+	Port int `yaml:"port"`
+	// User is the SSH login username (default: $USER / current OS user).
+	User string `yaml:"user"`
+	// KeyPath is the path to the SSH private key file; supports ~ expansion.
+	// Defaults to ~/.ssh/id_ed25519 then ~/.ssh/id_rsa if left empty.
+	KeyPath string `yaml:"key_path"`
+	// RemoteHost is the host to connect to *inside* the SSH session.
+	// When SSHing directly into the DB VM, set this to "localhost" so that
+	// PostgreSQL sees the connection as 127.0.0.1 (matches pg_hba.conf).
+	// Defaults to "localhost" when empty.
+	RemoteHost string `yaml:"remote_host"`
+	// RemotePort is the PostgreSQL port inside the SSH session.
+	// Defaults to the database default_port when zero.
+	RemotePort int `yaml:"remote_port"`
 }
 
 // CoolifyBase holds Coolify platform configuration.
@@ -104,12 +162,49 @@ type Spec struct {
 	Environment          Env            `yaml:"environment"`
 	EnvironmentOverrides map[string]Env `yaml:"environment_overrides,omitempty"`
 	Secrets              Secrets        `yaml:"secrets"`
+	Database             Database       `yaml:"database,omitempty"`
 	Auth                 Auth           `yaml:"authentication"`
 	Traefik              TraefikSpec    `yaml:"traefik"`
 	Dependencies         []string       `yaml:"dependencies"`
 	Node                 string         `yaml:"node"`
 	Schedule             string         `yaml:"schedule"`
 	Note                 string         `yaml:"note"`
+}
+
+// Database describes the desired PostgreSQL database state for an app.
+// When enabled, mn-cli provisions the database and role at deploy time,
+// writes credentials to vault, and injects DATABASE_URL as an env var.
+type Database struct {
+	// Enabled activates automatic database provisioning during deploy.
+	// Default: false — the block is ignored unless explicitly set to true.
+	Enabled bool `yaml:"enabled"`
+
+	// Host overrides base.yaml database.default_host for this app.
+	// Leave empty to inherit the platform default.
+	Host string `yaml:"host,omitempty"`
+
+	// Port overrides base.yaml database.default_port for this app.
+	// Leave zero/empty to inherit the platform default (5432).
+	Port int `yaml:"port,omitempty"`
+
+	// Name is the PostgreSQL database name to create.
+	// Convention: mirror the app's role name (e.g. "public_api" for role "api").
+	Name string `yaml:"name"`
+
+	// Role is the PostgreSQL login role to create for this app.
+	// A strong random password is generated and stored in vault.
+	// Convention: short functional name, e.g. "api", "internal_api", "garmin_sync".
+	Role string `yaml:"role"`
+
+	// Extensions lists PostgreSQL extensions to enable inside the database.
+	// Applied as: CREATE EXTENSION IF NOT EXISTS "ext" in the target database.
+	// Examples: ["uuid-ossp", "pgcrypto", "pg_trgm"]
+	Extensions []string `yaml:"extensions,omitempty"`
+
+	// SSLMode sets the sslmode query parameter in the generated DATABASE_URL.
+	// Valid values: disable | require | verify-ca | verify-full.
+	// Defaults to base.yaml database.default_ssl_mode ("require").
+	SSLMode string `yaml:"ssl_mode,omitempty"`
 }
 
 // ApplyStageOverrides merges environment_overrides[stage] into the base
@@ -218,6 +313,15 @@ type Auth struct {
 	//     - https://hello-world.apps.mayencenouvelle.internal/auth/callback
 	//     - https://custom.example.com/callback
 	RedirectURIs []string `yaml:"redirect_uris"`
+	// RedirectURIsRegex is an optional list of full redirect URI regex patterns
+	// sent to Authentik with matching_mode: "regex". These are always appended
+	// to the auto-derived strict URIs (or the explicit redirect_uris list) and
+	// allow a single pattern to cover multiple paths — e.g. all Swagger module
+	// pages without enumerating every sub-path.
+	// Example:
+	//   redirect_uris_regex:
+	//     - "^https://(dev-)?api\\.mayencenouvelle\\.com/docs(/[^/]+)?/oauth2-redirect\\.html$"
+	RedirectURIsRegex []string `yaml:"redirect_uris_regex"`
 }
 
 // TraefikSpec holds app-specific Traefik overrides.

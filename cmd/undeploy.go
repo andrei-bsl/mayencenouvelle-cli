@@ -11,12 +11,14 @@ import (
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/github"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/manifest"
 	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/traefik"
+	"github.com/mayencenouvelle/mayencenouvelle-cli/internal/vault"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var deleteApp bool
 var undeployStage string
+var dropDB bool
 
 var undeployCmd = &cobra.Command{
 	Use:   "undeploy <app-name>",
@@ -50,6 +52,10 @@ Examples:
 		app, err := loader.LoadApp(appName)
 		if err != nil {
 			return err
+		}
+		base, err := loader.LoadBase()
+		if err != nil {
+			return fmt.Errorf("loading base config: %w", err)
 		}
 
 		// Apply stage: sets branch to "main" for prod, keeps manifest branch for dev.
@@ -165,6 +171,24 @@ Examples:
 
 			fmt.Printf("\n%s %s deleted. Run 'mn-cli deploy %s' to redeploy from scratch.\n",
 				color.GreenString("✓"), color.New(color.Bold).Sprint(appName), appName)
+
+			if dropDB {
+				if app.Spec.Database.Enabled {
+					fmt.Printf("%s Dropping database for %s...\n\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName))
+					vc := vault.NewClient(
+						viper.GetString("BAO_ADDR"),
+						viper.GetString("BAO_TOKEN"),
+						viper.GetString("BAO_NAMESPACE"),
+					)
+					if !vc.Enabled() {
+						fmt.Printf("  %s [Database] vault not configured — skipping DB drop (set BAO_ADDR + BAO_TOKEN)\n", color.YellowString("⚠"))
+					} else if err := dropAppDatabase(ctx, app, base, vc); err != nil {
+						fmt.Printf("  %s [Database] drop failed: %v\n", color.RedString("✗"), err)
+					}
+				} else {
+					fmt.Printf("  %s [Database] app does not have spec.database.enabled: true — nothing to drop\n", color.YellowString("⚠"))
+				}
+			}
 			return nil
 		}
 
@@ -178,6 +202,24 @@ Examples:
 
 		fmt.Printf("\n%s %s stopped. Config preserved in Coolify — run 'mn-cli deploy %s' to restart.\n",
 			color.GreenString("✓"), color.New(color.Bold).Sprint(appName), appName)
+
+		if dropDB {
+			if app.Spec.Database.Enabled {
+				fmt.Printf("%s Dropping database for %s...\n\n", color.CyanString("→"), color.New(color.Bold).Sprint(appName))
+				vc := vault.NewClient(
+					viper.GetString("BAO_ADDR"),
+					viper.GetString("BAO_TOKEN"),
+					viper.GetString("BAO_NAMESPACE"),
+				)
+				if !vc.Enabled() {
+					fmt.Printf("  %s [Database] vault not configured — skipping DB drop (set BAO_ADDR + BAO_TOKEN)\n", color.YellowString("⚠"))
+				} else if err := dropAppDatabase(ctx, app, base, vc); err != nil {
+					fmt.Printf("  %s [Database] drop failed: %v\n", color.RedString("✗"), err)
+				}
+			} else {
+				fmt.Printf("  %s [Database] app does not have spec.database.enabled: true — nothing to drop\n", color.YellowString("⚠"))
+			}
+		}
 		return nil
 	},
 }
@@ -185,4 +227,5 @@ Examples:
 func init() {
 	undeployCmd.Flags().BoolVar(&deleteApp, "delete", false, "Permanently delete the app from Coolify (irreversible)")
 	undeployCmd.Flags().StringVar(&undeployStage, "stage", "dev", "Deployment stage to target: dev or prod (default: dev)")
+	undeployCmd.Flags().BoolVar(&dropDB, "drop-db", false, "Also drop the PostgreSQL database and delete vault credentials (irreversible, requires spec.database.enabled: true)")
 }
