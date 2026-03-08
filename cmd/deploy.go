@@ -417,13 +417,17 @@ func deploySingleApp(ctx context.Context, appName, stage string) (*manifest.AppC
 	if err := coolifyClient.Deploy(ctx, appID); err != nil {
 		return nil, nil, fmt.Errorf("coolify deploy: %w", err)
 	}
+	// Brief pause so Coolify transitions the status away from the previous
+	// "running" container before we start polling — avoids a false-healthy
+	// return while the new build is still in progress.
+	time.Sleep(15 * time.Second)
 
 	domainHint := app.GetDomains().Private
 	if domainHint == "" {
 		domainHint = app.GetDomains().Public
 	}
 	step("Health", fmt.Sprintf("Waiting for %s to become healthy", domainHint))
-	if err := coolifyClient.WaitForHealthy(ctx, appID, 5*time.Minute); err != nil {
+	if err := coolifyClient.WaitForHealthy(ctx, appID, 15*time.Minute); err != nil {
 		return nil, nil, fmt.Errorf("health check failed: %w", err)
 	}
 	ok("Health", "service is healthy")
