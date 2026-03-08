@@ -49,6 +49,14 @@ type DatabaseBase struct {
 	// outside the lab network). When Enabled is true, a local port-forward is
 	// opened through the jump host before connecting to PostgreSQL.
 	SSHTunnel SSHTunnelConfig `yaml:"ssh_tunnel"`
+	// ReadonlyRoles is a list of PostgreSQL roles that should get read-only
+	// access to every database provisioned by mn-cli (e.g. "dbgate_internal_ro").
+	// For each role, the provisioner runs:
+	//   GRANT CONNECT ON DATABASE <db> TO <role>
+	//   GRANT USAGE ON SCHEMA public TO <role>
+	//   GRANT SELECT ON ALL TABLES IN SCHEMA public TO <role>
+	//   ALTER DEFAULT PRIVILEGES ... GRANT SELECT ON TABLES TO <role>
+	ReadonlyRoles []string `yaml:"readonly_roles"`
 }
 
 // SSHTunnelConfig holds SSH jump-host settings for the database provisioner.

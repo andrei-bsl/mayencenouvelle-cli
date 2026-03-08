@@ -727,6 +727,7 @@ func runDatabaseBootstrap(
 		Role:          db.Role,
 		Extensions:    db.Extensions,
 		SSLMode:       sslMode,
+		ReadonlyRoles: base.Database.ReadonlyRoles,
 	}
 
 	result, err := database.EnsureDatabase(ctx, dbCfg, existingPassword)
@@ -783,8 +784,6 @@ func runDatabaseBootstrap(
 
 	return nil
 }
-
-
 
 // stringFromMap retrieves a string value from a map[string]interface{},
 // returning the fallback when the key is absent or the value is not a string.

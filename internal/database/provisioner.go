@@ -63,6 +63,10 @@ type Config struct {
 	Role         string   // login role to create/verify (e.g. "api")
 	Extensions   []string // PG extensions to enable inside the database (e.g. "uuid-ossp")
 	SSLMode      string   // sslmode for the generated DATABASE_URL: disable|require|verify-ca|verify-full
+	// ReadonlyRoles is a list of PG roles that get read-only access to the
+	// provisioned database: CONNECT + USAGE on schema public + SELECT on all
+	// current and future tables. Use for monitoring/browse tools like DBgate.
+	ReadonlyRoles []string
 }
 
 // Credentials holds the resolved database access details for the app.
@@ -224,6 +228,22 @@ func EnsureDatabase(ctx context.Context, cfg Config, existingPassword string) (R
 			fmt.Sprintf(`GRANT ALL ON SCHEMA public TO %s`, quoteIdent(cfg.Role)),
 		); err != nil {
 			return Result{}, fmt.Errorf("database: grant schema public to %q: %w", cfg.Role, err)
+		}
+
+		// Grant read-only access to monitoring / browse roles (e.g. dbgate_internal_ro).
+		// This runs on every deploy so new tables added after first provision are covered.
+		for _, roRole := range cfg.ReadonlyRoles {
+			// CONNECT is on the database — execute via main admin connection.
+			_, _ = db.ExecContext(ctx,
+				fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
+					quoteIdent(cfg.DatabaseName), quoteIdent(roRole)))
+			// Schema + table grants must run inside the target database.
+			_, _ = targetDB.ExecContext(ctx,
+				fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, quoteIdent(roRole)))
+			_, _ = targetDB.ExecContext(ctx,
+				fmt.Sprintf(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO %s`, quoteIdent(roRole)))
+			_, _ = targetDB.ExecContext(ctx,
+				fmt.Sprintf(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO %s`, quoteIdent(roRole)))
 		}
 
 		for _, ext := range cfg.Extensions {
