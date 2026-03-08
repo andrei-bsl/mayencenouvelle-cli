@@ -435,29 +435,8 @@ Examples:
 			return nil
 		}
 
-		cfg, cleanup, err := setupDBAdminConfig(ctx, app, base, vc)
-		if err != nil {
+		if err := dropAppDatabase(ctx, app, base, vc); err != nil {
 			return err
-		}
-		defer cleanup()
-
-		step("Database", fmt.Sprintf("Dropping database %q and role %q", dbName, roleName))
-		if err := database.DropDatabase(ctx, cfg); err != nil {
-			return err
-		}
-		ok("Database", fmt.Sprintf("database %q and role %q dropped", dbName, roleName))
-
-		dbAppsPath := base.Database.AppsVaultPath
-		if dbAppsPath == "" {
-			dbAppsPath = "mn/data/lab/db01/apps"
-		}
-		dbAppsPath = dbAppsPath + "/" + appName
-
-		step("Vault", fmt.Sprintf("Deleting credentials at %s", dbAppsPath))
-		if err := vc.KVDelete(ctx, dbAppsPath); err != nil {
-			fmt.Printf("  %s [Vault] delete failed (non-fatal): %v\n", color.YellowString("⚠"), err)
-		} else {
-			ok("Vault", "credentials deleted")
 		}
 
 		fmt.Printf("\n%s Database for %s dropped. Run '%s' to re-provision.\n",

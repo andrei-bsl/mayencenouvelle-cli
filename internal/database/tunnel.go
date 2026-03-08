@@ -68,7 +68,14 @@ func (t *Tunnel) Close() {
 
 // OpenTunnel opens an SSH connection to cfg.Host and starts a local port-forward
 // to remoteHost:remotePort. The caller must call Tunnel.Close() when done.
+//
+// Note: ctx is checked for prior cancellation before dialing, but the underlying
+// ssh.Dial and net.Listen calls are not context-aware. Callers should not rely on
+// context deadlines or cancellation interrupting the connection once it has started.
 func OpenTunnel(ctx context.Context, cfg TunnelConfig, remoteHost string, remotePort int) (*Tunnel, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("ssh tunnel: %w", err)
+	}
 	if cfg.Host == "" {
 		return nil, fmt.Errorf("ssh tunnel: host is required")
 	}

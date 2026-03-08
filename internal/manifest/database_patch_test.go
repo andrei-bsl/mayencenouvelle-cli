@@ -147,10 +147,14 @@ func TestPatchSecrets_AddsEnvironmentEntry(t *testing.T) {
 func TestPatchSecrets_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	appsDir := filepath.Join(dir, "apps")
-	os.MkdirAll(appsDir, 0o755)
+	if err := os.MkdirAll(appsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	manifestPath := filepath.Join(appsDir, "test-app.yaml")
-	os.WriteFile(manifestPath, []byte(manifestWithDB), 0o644)
+	if err := os.WriteFile(manifestPath, []byte(manifestWithDB), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	loader := &Loader{manifestsDir: dir, appsDir: appsDir}
 
@@ -192,8 +196,12 @@ spec:
 
 	dir := t.TempDir()
 	appsDir := filepath.Join(dir, "apps")
-	os.MkdirAll(appsDir, 0o755)
-	os.WriteFile(filepath.Join(appsDir, "test-app.yaml"), []byte(noVaultPath), 0o644)
+	if err := os.MkdirAll(appsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appsDir, "test-app.yaml"), []byte(noVaultPath), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	loader := &Loader{manifestsDir: dir, appsDir: appsDir}
 	changed, err := loader.PatchSecrets("test-app", "mn/data/apps/test-app", "mn/data/lab/db01/apps/test-app")
@@ -204,9 +212,14 @@ spec:
 		t.Fatal("expected changed=true")
 	}
 
-	out, _ := os.ReadFile(filepath.Join(appsDir, "test-app.yaml"))
+	out, err := os.ReadFile(filepath.Join(appsDir, "test-app.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var app AppConfig
-	yaml.Unmarshal(out, &app)
+	if err = yaml.Unmarshal(out, &app); err != nil {
+		t.Fatalf("parse patched manifest: %v", err)
+	}
 
 	if app.Spec.Secrets.VaultPath != "mn/data/apps/test-app" {
 		t.Errorf("vault_path not set: got %q", app.Spec.Secrets.VaultPath)

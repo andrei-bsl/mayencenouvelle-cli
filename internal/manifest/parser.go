@@ -273,60 +273,6 @@ func patchEnvironmentValue(specNode *yaml.Node, key, value string, changed *bool
 	*changed = true
 }
 
-// patchInjectEntry ensures an inject sequence entry for envName exists under
-// the secrets MappingNode. Adds one if not found. If vaultPath is non-empty it
-// is written as vault_path in the new entry (cross-path injection).
-func patchInjectEntry(secretsNode *yaml.Node, envName, vaultKey, vaultPath string, changed *bool) {
-	// Find or create inject sequence.
-	var injectSeq *yaml.Node
-	for i := 0; i+1 < len(secretsNode.Content); i += 2 {
-		if secretsNode.Content[i].Value == "inject" {
-			if secretsNode.Content[i+1].Kind == yaml.SequenceNode {
-				injectSeq = secretsNode.Content[i+1]
-			}
-			break
-		}
-	}
-	if injectSeq == nil {
-		injectSeq = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-		secretsNode.Content = append(secretsNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "inject"},
-			injectSeq,
-		)
-	}
-
-	// Check if an entry for this env already exists.
-	for _, item := range injectSeq.Content {
-		if item.Kind != yaml.MappingNode {
-			continue
-		}
-		if v := findMappingValue(item, "env"); v != nil && v.Value == envName {
-			return // already present
-		}
-	}
-
-	// Prepend new entry so DATABASE_URL injection is visible near the top
-	// of the inject list (convention: DB creds first, then OIDC creds).
-	entry := &yaml.Node{
-		Kind: yaml.MappingNode,
-		Tag:  "!!map",
-		Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Value: "env"},
-			{Kind: yaml.ScalarNode, Value: envName},
-			{Kind: yaml.ScalarNode, Value: "vault_key"},
-			{Kind: yaml.ScalarNode, Value: vaultKey},
-		},
-	}
-	if vaultPath != "" {
-		entry.Content = append(entry.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "vault_path"},
-			&yaml.Node{Kind: yaml.ScalarNode, Value: vaultPath},
-		)
-	}
-	injectSeq.Content = append([]*yaml.Node{entry}, injectSeq.Content...)
-	*changed = true
-}
-
 // loadFile parses a single YAML manifest file.
 func (l *Loader) loadFile(path string) (*AppConfig, error) {
 	data, err := os.ReadFile(path)

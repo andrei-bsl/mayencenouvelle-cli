@@ -37,6 +37,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strings"
 
 	_ "github.com/lib/pq"
@@ -326,14 +327,32 @@ func DropDatabase(ctx context.Context, cfg Config) error {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func buildURL(host string, port int, dbName, user, password, sslMode string) string {
-	return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
-		user, password, host, port, dbName, sslMode)
+	u := &url.URL{
+		Scheme:   "postgresql",
+		User:     url.UserPassword(user, password),
+		Host:     fmt.Sprintf("%s:%d", host, port),
+		Path:     "/" + dbName,
+		RawQuery: "sslmode=" + url.QueryEscape(sslMode),
+	}
+	return u.String()
 }
 
 func buildDSN(host string, port int, dbName, user, password, sslMode string) string {
 	return fmt.Sprintf(
 		"host=%s port=%d dbname=%s user=%s password=%s sslmode=%s connect_timeout=10",
-		host, port, dbName, user, password, sslMode)
+		dsnValue(host), port, dsnValue(dbName), dsnValue(user), dsnValue(password), dsnValue(sslMode))
+}
+
+// dsnValue wraps a libpq keyword=value DSN component in single quotes when it
+// contains characters that require quoting (space, tab, newline, backslash, or
+// single quote). Backslashes and single quotes inside the value are escaped.
+func dsnValue(s string) string {
+	if !strings.ContainsAny(s, " \t\n\\'") {
+		return s
+	}
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `'`, `\'`)
+	return "'" + s + "'"
 }
 
 func roleExists(ctx context.Context, db *sql.DB, role string) (bool, error) {
